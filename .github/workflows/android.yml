@@ -36,10 +36,6 @@ jobs:
             exit 1
           fi
           echo "$KEYSTORE_BASE64" | base64 --decode > "$ANDROID_KEYSTORE_PATH"
-          echo "Checking decoded PKCS12 keystore..."
-          keytool -list -keystore "$ANDROID_KEYSTORE_PATH" -storetype PKCS12 -storepass "$ANDROID_KEYSTORE_PASSWORD"
-          keytool -list -keystore "$ANDROID_KEYSTORE_PATH" -storetype PKCS12 -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS"
-          echo "Keystore and alias verification passed."
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

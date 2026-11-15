@@ -17,6 +17,12 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.view.ViewGroup
 import android.widget.*
+import android.content.Context
+import android.net.Uri
+import android.provider.ContactsContract
+import android.view.HapticFeedbackConstants
+import android.view.ViewConfiguration
+import kotlin.math.abs
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -30,11 +36,39 @@ data class CallEntry(
     val duration: Long
 )
 
+// Missed / Rejected / Blocked: calls that are never answered (no duration, grouped by count).
+internal fun isNoAnswerType(type: Int) =
+    type == CallLog.Calls.MISSED_TYPE ||
+        type == CallLog.Calls.REJECTED_TYPE ||
+        type == CallLog.Calls.BLOCKED_TYPE
+
+// One card in the list: a single call, or a group of same-number + same-type no-answer rows.
+data class DisplayItem(val rows: List<CallEntry>) {
+    val rep: CallEntry get() = rows.maxByOrNull { it.date }!!
+    val count: Int get() = rows.size
+    val grouped: Boolean get() = isNoAnswerType(rep.type)
+    val key: String get() = if (grouped) "g|${rep.number}|${rep.type}" else "e|${rep.id}"
+}
+
 class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var list: LinearLayout
+    private lateinit var scrollView: ScrollView
+    private lateinit var bottomBar: LinearLayout
+    private lateinit var selectBar: LinearLayout
+    private lateinit var selectCount: TextView
+    private lateinit var undoBar: LinearLayout
+    private lateinit var undoText: TextView
+    private val hideUndo = Runnable { undoBar.visibility = View.GONE }
     private val entries = mutableListOf<CallEntry>()
+    private var currentItems: List<DisplayItem> = emptyList()
+    private var selectMode = false
+    private val selectedKeys = linkedSetOf<String>()
+    private var lastDeleted: List<CallEntry> = emptyList()
+    private val names = HashMap<String, String>()
+    private val lookedUp = HashSet<String>()
     private val requestCode = 410
+    private val contactsCode = 411
     private var searchBox: EditText? = null
     private var activeFilter: String = "All"
     private val filterChips = linkedMapOf<String, TextView>()
@@ -178,17 +212,17 @@ class MainActivity : Activity() {
         section.addView(textView("EDIT YOUR HISTORY", 9f, muted, true))
         page.addView(section)
 
-        val scroll = ScrollView(this).apply { clipToPadding = false }
+        scrollView = ScrollView(this).apply { clipToPadding = false }
         list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(12), 0, dp(20))
         }
-        scroll.addView(list)
-        page.addView(scroll, LinearLayout.LayoutParams(
+        scrollView.addView(list)
+        page.addView(scrollView, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
-        val bottom = LinearLayout(this).apply {
+        bottomBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(10), 0, dp(4))
@@ -201,7 +235,7 @@ class MainActivity : Activity() {
             setPadding(dp(8), dp(12), dp(8), dp(12))
             setOnClickListener { requestPermissions() }
         }
-        bottom.addView(permission, LinearLayout.LayoutParams(0, dp(48), 1f))
+        bottomBar.addView(permission, LinearLayout.LayoutParams(0, dp(48), 1f))
         val add = TextView(this).apply {
             text = "+  NEW ENTRY"
             textSize = 12f
@@ -211,10 +245,45 @@ class MainActivity : Activity() {
             background = rounded(ink, 15)
             setOnClickListener { addNewEntry() }
         }
-        bottom.addView(add, LinearLayout.LayoutParams(dp(158), dp(48)))
-        page.addView(bottom)
+        bottomBar.addView(add, LinearLayout.LayoutParams(dp(158), dp(48)))
+        selectBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), 0, dp(8), 0)
+            background = rounded(0xFF202020.toInt(), 15)
+            visibility = View.GONE
+        }
+        selectCount = textView("0 selected", 13f, 0xFFFFFFFF.toInt(), true)
+        selectBar.addView(selectCount, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        selectBar.addView(actionButton("CANCEL", 0xFFFFFFFF.toInt(), 0xFF3A3A3A.toInt()) { setSelectMode(false) },
+            LinearLayout.LayoutParams(dp(72), dp(34)))
+        selectBar.addView(actionButton("DELETE", 0xFFFFFFFF.toInt(), 0xFF8A2929.toInt()) { confirmDeleteSelected() },
+            LinearLayout.LayoutParams(dp(72), dp(34)).apply { marginStart = dp(7) })
+        page.addView(selectBar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(48)
+        ).apply { topMargin = dp(10); bottomMargin = dp(4) })
+        page.addView(bottomBar)
 
-        setContentView(page)
+        undoText = textView("", 13f, 0xFFFFFFFF.toInt(), true)
+        undoBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(8), dp(8), dp(8))
+            background = rounded(0xFF202020.toInt(), 15)
+            elevation = dp(6).toFloat()
+            visibility = View.GONE
+        }
+        undoBar.addView(undoText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        undoBar.addView(actionButton("UNDO", 0xFFFFFFFF.toInt(), 0xFF3A3A3A.toInt()) { restoreDeleted() },
+            LinearLayout.LayoutParams(dp(68), dp(34)))
+        val root = FrameLayout(this)
+        root.addView(page, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        root.addView(undoBar, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM
+        ).apply { setMargins(dp(20), 0, dp(20), dp(76)) })
+        setContentView(root)
     }
 
     private fun updateFilterChips() {
@@ -248,24 +317,43 @@ class MainActivity : Activity() {
         checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
     private fun checkPermissionsAndLoad() {
-        if (has(Manifest.permission.READ_CALL_LOG)) loadCalls()
-        else {
+        if (has(Manifest.permission.READ_CALL_LOG)) {
+            loadCalls()
+            askContactsOnce()
+        } else {
             status.text = "Call log permission is required."
             requestPermissions()
         }
     }
 
     private fun requestPermissions() {
+        getSharedPreferences("chaman_prefs", MODE_PRIVATE).edit().putBoolean("contacts_asked", true).apply()
         requestPermissions(
-            arrayOf(Manifest.permission.READ_CALL_LOG, Manifest.permission.WRITE_CALL_LOG),
+            arrayOf(
+                Manifest.permission.READ_CALL_LOG, Manifest.permission.WRITE_CALL_LOG,
+                Manifest.permission.READ_CONTACTS
+            ),
             requestCode
         )
+    }
+
+    // Contact names are optional: ask once, and the app works fine if it is denied.
+    private fun askContactsOnce() {
+        if (has(Manifest.permission.READ_CONTACTS)) return
+        val prefs = getSharedPreferences("chaman_prefs", MODE_PRIVATE)
+        if (prefs.getBoolean("contacts_asked", false)) return
+        prefs.edit().putBoolean("contacts_asked", true).apply()
+        requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), contactsCode)
     }
 
     override fun onRequestPermissionsResult(
         requestCode: Int, permissions: Array<out String>, grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == contactsCode) {
+            resolveNames()
+            return
+        }
         if (requestCode == this.requestCode) {
             status.text = "Read: ${has(Manifest.permission.READ_CALL_LOG)}  |  Write: ${has(Manifest.permission.WRITE_CALL_LOG)}"
             loadCalls()
@@ -306,6 +394,7 @@ class MainActivity : Activity() {
             }
             status.text = "${entries.size} records  ·  Write ${if (has(Manifest.permission.WRITE_CALL_LOG)) "available" else "restricted"}"
             renderEntries()
+            resolveNames()
         } catch (e: SecurityException) {
             status.text = "Access denied by Android: ${e.message ?: "permission restricted"}"
         } catch (e: Exception) {
@@ -314,12 +403,52 @@ class MainActivity : Activity() {
     }
 
 
+    private fun buildItems(filtered: List<CallEntry>): List<DisplayItem> {
+        val groups = LinkedHashMap<String, MutableList<CallEntry>>()
+        filtered.forEach { e ->
+            val k = if (isNoAnswerType(e.type)) "g|${e.number}|${e.type}" else "e|${e.id}"
+            groups.getOrPut(k) { mutableListOf() }.add(e)
+        }
+        return groups.values.map { DisplayItem(it) }
+    }
+
+    private fun resolveNames() {
+        if (!has(Manifest.permission.READ_CONTACTS)) return
+        val numbers = entries.map { it.number }.distinct()
+            .filter { it !in lookedUp && it != "Unknown" && it.isNotBlank() }
+        if (numbers.isEmpty()) return
+        Thread {
+            val found = HashMap<String, String>()
+            numbers.forEach { n ->
+                try {
+                    val uri = Uri.withAppendedPath(
+                        ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(n)
+                    )
+                    contentResolver.query(
+                        uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null
+                    )?.use { c ->
+                        if (c.moveToFirst()) c.getString(0)?.let { found[n] = it }
+                    }
+                } catch (e: Exception) {
+                }
+            }
+            runOnUiThread {
+                lookedUp.addAll(numbers)
+                names.putAll(found)
+                if (found.isNotEmpty()) renderEntries()
+            }
+        }.start()
+    }
+
     private fun renderEntries() {
         if (!::list.isInitialized) return
+        val keepScroll = scrollView.scrollY
         list.removeAllViews()
         val query = searchBox?.text?.toString()?.trim()?.lowercase(Locale.getDefault()).orEmpty()
         val filtered = entries.filter { entry ->
-            val matchesQuery = query.isEmpty() || entry.number.lowercase(Locale.getDefault()).contains(query)
+            val name = names[entry.number]?.lowercase(Locale.getDefault()).orEmpty()
+            val matchesQuery = query.isEmpty() ||
+                entry.number.lowercase(Locale.getDefault()).contains(query) || name.contains(query)
             val matchesFilter = when (activeFilter) {
                 "Incoming" -> entry.type == CallLog.Calls.INCOMING_TYPE
                 "Outgoing" -> entry.type == CallLog.Calls.OUTGOING_TYPE
@@ -330,6 +459,10 @@ class MainActivity : Activity() {
         }
 
         if (filtered.isEmpty()) {
+            currentItems = emptyList()
+            selectedKeys.clear()
+            selectMode = false
+            updateSelectBar()
             val empty = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
@@ -344,101 +477,156 @@ class MainActivity : Activity() {
             return
         }
 
-        val displayEntries = mutableListOf<Pair<CallEntry, Int>>()
-        val missedGroups = filtered.filter { it.type == CallLog.Calls.MISSED_TYPE }
-            .groupBy { it.number }
-        val emittedMissed = mutableSetOf<String>()
-        filtered.forEach { entry ->
-            if (entry.type == CallLog.Calls.MISSED_TYPE) {
-                if (emittedMissed.add(entry.number)) {
-                    val group = missedGroups[entry.number].orEmpty()
-                    displayEntries.add(group.maxByOrNull { it.date }!! to group.size)
-                }
-            } else {
-                displayEntries.add(entry to 0)
-            }
-        }
-
-        displayEntries.forEach { (entry, missedCount) ->
-            val card = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(15), dp(14), dp(15), dp(12))
-                background = rounded(0xFFFFFFFF.toInt(), 18, line)
-            }
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val avatar = TextView(this).apply {
-                val initial = entry.number.firstOrNull()?.toString() ?: "?"
-                text = initial
-                textSize = 17f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(ink)
-                background = rounded(0xFFF0F0EC.toInt(), 15)
-            }
-            row.addView(avatar, LinearLayout.LayoutParams(dp(44), dp(44)))
-
-            val info = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), 0, 0, 0)
-            }
-            info.addView(textView(entry.number, 16f, ink, true))
-            val time = SimpleDateFormat("dd MMM • hh:mm a", Locale.getDefault()).format(Date(entry.date))
-            info.addView(textView("${typeName(entry.type)}  ·  $time", 11f, muted).apply {
-                setPadding(0, dp(5), 0, 0)
-            })
-            row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            card.addView(row)
-
-            val divider = View(this).apply { setBackgroundColor(line) }
-            val dividerParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
-            ).apply { topMargin = dp(12); bottomMargin = dp(8) }
-            card.addView(divider, dividerParams)
-
-            val actions = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val meta = if (missedCount > 0) {
-                "MISSED  ×  $missedCount"
-            } else {
-                "${entry.duration}s duration"
-            }
-            actions.addView(textView(meta, 11f, muted, missedCount > 0),
-                LinearLayout.LayoutParams(0, dp(36), 1f))
-            val edit = TextView(this).apply {
-                text = "EDIT"
-                textSize = 10f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(ink)
-                background = rounded(0xFFF2F2EF.toInt(), 10)
-                setOnClickListener { editEntry(entry) }
-            }
-            actions.addView(edit, LinearLayout.LayoutParams(dp(64), dp(34)))
-            val delete = TextView(this).apply {
-                text = "DELETE"
-                textSize = 10f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setTextColor(0xFF8A2929.toInt())
-                background = rounded(0xFFF8EEEE.toInt(), 10)
-                setOnClickListener { confirmDelete(entry) }
-            }
-            val deleteParams = LinearLayout.LayoutParams(dp(72), dp(34)).apply {
-                marginStart = dp(7)
-            }
-            actions.addView(delete, deleteParams)
-            card.addView(actions)
-
-            val params = LinearLayout.LayoutParams(
+        val items = buildItems(filtered)
+        currentItems = items
+        selectedKeys.retainAll(items.map { it.key }.toSet())
+        if (selectMode && selectedKeys.isEmpty()) selectMode = false
+        items.forEach { item ->
+            list.addView(buildRow(item), LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(10) }
-            list.addView(card, params)
+            ).apply { bottomMargin = dp(10) })
         }
+        updateSelectBar()
+        scrollView.post { scrollView.scrollTo(0, keepScroll) }
+    }
+
+    private fun actionButton(label: String, textColor: Int, bgColor: Int, onClick: () -> Unit) =
+        TextView(this).apply {
+            text = label
+            textSize = 10f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(textColor)
+            background = rounded(bgColor, 10)
+            setOnClickListener { onClick() }
+        }
+
+    private fun buildRow(item: DisplayItem): View {
+        val entry = item.rep
+        val selected = selectMode && item.key in selectedKeys
+        val name = names[entry.number]
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(15), dp(14), dp(15), dp(12))
+            background = rounded(
+                if (selected) 0xFFEFEFEA.toInt() else 0xFFFFFFFF.toInt(), 18,
+                if (selected) ink else line
+            )
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val avatar = TextView(this).apply {
+            text = if (selected) "✓" else ((name ?: entry.number).firstOrNull()?.toString() ?: "?")
+            textSize = 17f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(if (selected) 0xFFFFFFFF.toInt() else ink)
+            background = rounded(if (selected) ink else 0xFFF0F0EC.toInt(), 15)
+        }
+        row.addView(avatar, LinearLayout.LayoutParams(dp(44), dp(44)))
+
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), 0, 0, 0)
+        }
+        info.addView(textView(name ?: entry.number, 16f, ink, true))
+        if (name != null) {
+            info.addView(textView(entry.number, 12f, muted).apply { setPadding(0, dp(3), 0, 0) })
+        }
+        val time = SimpleDateFormat("dd MMM • hh:mm a", Locale.getDefault()).format(Date(entry.date))
+        val typeLine = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(5), 0, 0)
+        }
+        typeLine.addView(CallTypeIcon(this, entry.type, muted), LinearLayout.LayoutParams(dp(13), dp(13)))
+        typeLine.addView(textView("${typeName(entry.type)}  ·  $time", 11f, muted).apply {
+            setPadding(dp(5), 0, 0, 0)
+        })
+        info.addView(typeLine)
+        row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        card.addView(row)
+
+        val divider = View(this).apply { setBackgroundColor(line) }
+        card.addView(divider, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
+        ).apply { topMargin = dp(12); bottomMargin = dp(8) })
+
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val meta = if (item.grouped) "${typeName(entry.type).uppercase()}  ×  ${item.count}"
+        else "${entry.duration}s duration"
+        actions.addView(textView(meta, 11f, muted, item.grouped),
+            LinearLayout.LayoutParams(0, dp(36), 1f))
+        if (!selectMode) {
+            actions.addView(
+                actionButton("COPY", ink, 0xFFF2F2EF.toInt()) { addNewEntry(item) },
+                LinearLayout.LayoutParams(dp(52), dp(34))
+            )
+            actions.addView(
+                actionButton("EDIT", ink, 0xFFF2F2EF.toInt()) { editEntry(item) },
+                LinearLayout.LayoutParams(dp(52), dp(34)).apply { marginStart = dp(6) }
+            )
+            actions.addView(
+                actionButton("DELETE", 0xFF8A2929.toInt(), 0xFFF8EEEE.toInt()) { confirmDelete(item) },
+                LinearLayout.LayoutParams(dp(64), dp(34)).apply { marginStart = dp(6) }
+            )
+        }
+        card.addView(actions)
+
+        val back = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(22), 0, dp(22), 0)
+            background = rounded(0xFFE9E9E4.toInt(), 18)
+        }
+        back.addView(textView("EDIT", 11f, ink, true),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        back.addView(textView("DELETE", 11f, 0xFF8A2929.toInt(), true).apply { gravity = Gravity.END },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        return SwipeRow(
+            this, card, back,
+            onSwipeRight = { editEntry(item) },
+            onSwipeLeft = { confirmDelete(item) },
+            onLongPress = { startSelect(item) },
+            onTap = { if (selectMode) toggleSelect(item) }
+        ).apply { swipeEnabled = !selectMode }
+    }
+
+    private fun startSelect(item: DisplayItem) {
+        selectMode = true
+        selectedKeys.clear()
+        selectedKeys.add(item.key)
+        renderEntries()
+    }
+
+    private fun toggleSelect(item: DisplayItem) {
+        if (!selectedKeys.remove(item.key)) selectedKeys.add(item.key)
+        if (selectedKeys.isEmpty()) selectMode = false
+        renderEntries()
+    }
+
+    private fun setSelectMode(on: Boolean) {
+        selectMode = on
+        selectedKeys.clear()
+        renderEntries()
+    }
+
+    private fun updateSelectBar() {
+        if (!::selectBar.isInitialized) return
+        selectBar.visibility = if (selectMode) View.VISIBLE else View.GONE
+        bottomBar.visibility = if (selectMode) View.GONE else View.VISIBLE
+        selectCount.text = "${selectedKeys.size} selected"
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun onBackPressed() {
+        if (selectMode) setSelectMode(false) else super.onBackPressed()
     }
 
     private fun typeName(type: Int) = when (type) {
@@ -498,34 +686,27 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun missedCountForNumber(number: String): Int {
-        var count = 0
-        contentResolver.query(
-            CallLog.Calls.CONTENT_URI,
-            arrayOf(CallLog.Calls._ID),
-            "${CallLog.Calls.NUMBER} = ? AND ${CallLog.Calls.TYPE} = ?",
-            arrayOf(number, CallLog.Calls.MISSED_TYPE.toString()), null
-        )?.use { count = it.count }
-        return count
-    }
+    private fun deleteById(id: Long): Int = contentResolver.delete(
+        CallLog.Calls.CONTENT_URI, "${CallLog.Calls._ID} = ?", arrayOf(id.toString())
+    )
 
-    private fun reconcileMissedCount(number: String, keepId: Long, wanted: Int, date: Long) {
+    // Makes the number of rows for (number, type) equal to `wanted`. Keeps keepId,
+    // removes the oldest extras or inserts new rows with staggered timestamps.
+    private fun reconcileCount(number: String, type: Int, keepId: Long, wanted: Int, date: Long) {
         val ids = mutableListOf<Long>()
         contentResolver.query(
             CallLog.Calls.CONTENT_URI, arrayOf(CallLog.Calls._ID),
             "${CallLog.Calls.NUMBER} = ? AND ${CallLog.Calls.TYPE} = ?",
-            arrayOf(number, CallLog.Calls.MISSED_TYPE.toString()), "${CallLog.Calls.DATE} DESC"
+            arrayOf(number, type.toString()), "${CallLog.Calls.DATE} DESC"
         )?.use { c -> while (c.moveToNext()) ids.add(c.getLong(0)) }
         val keep = mutableListOf<Long>()
         if (keepId in ids) keep.add(keepId)
         ids.filter { it != keepId }.forEach { if (keep.size < wanted) keep.add(it) }
-        ids.filter { it !in keep }.forEach { id ->
-            contentResolver.delete(CallLog.Calls.CONTENT_URI, "${CallLog.Calls._ID} = ?", arrayOf(id.toString()))
-        }
+        ids.filter { it !in keep }.forEach { id -> deleteById(id) }
         repeat((wanted - keep.size).coerceAtLeast(0)) { index ->
             val values = ContentValues().apply {
                 put(CallLog.Calls.NUMBER, number)
-                put(CallLog.Calls.TYPE, CallLog.Calls.MISSED_TYPE)
+                put(CallLog.Calls.TYPE, type)
                 put(CallLog.Calls.DATE, date - (index + 1) * 1000L)
                 put(CallLog.Calls.DURATION, 0L)
                 put(CallLog.Calls.NEW, 1)
@@ -534,7 +715,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun editEntry(entry: CallEntry) {
+    private fun editEntry(item: DisplayItem) {
+        val entry = item.rep
         if (!has(Manifest.permission.WRITE_CALL_LOG)) {
             AlertDialog.Builder(this)
                 .setTitle("Write permission unavailable")
@@ -549,14 +731,10 @@ class MainActivity : Activity() {
         }
         val numberInput = EditText(this).apply { hint = "Phone number"; setText(entry.number) }
         val durationInput = EditText(this).apply {
-            hint = "Duration in seconds"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setText(entry.duration.toString())
         }
-        val missedCountInput = EditText(this).apply {
-            hint = "X Times Get Missed"
+        val countInput = EditText(this).apply {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setText(missedCountForNumber(entry.number).coerceAtLeast(1).toString())
         }
         val selectedDate = java.util.Calendar.getInstance().apply { timeInMillis = entry.date }
         val dateButton = Button(this).apply {
@@ -577,10 +755,15 @@ class MainActivity : Activity() {
             }
         }
         var selectedType = entry.type
+        val originalNoAnswer = isNoAnswerType(entry.type)
         val updateTypeFields = {
-            val missed = selectedType == CallLog.Calls.MISSED_TYPE
-            durationInput.visibility = if (missed) View.GONE else View.VISIBLE
-            missedCountInput.visibility = if (missed) View.VISIBLE else View.GONE
+            val noAnswer = isNoAnswerType(selectedType)
+            durationInput.visibility = if (noAnswer) View.GONE else View.VISIBLE
+            countInput.visibility = if (noAnswer) View.VISIBLE else View.GONE
+            durationInput.hint = "Duration in seconds" +
+                if (!originalNoAnswer) " (now ${entry.duration})" else ""
+            countInput.hint = "X Times Get ${typeName(selectedType)}" +
+                if (originalNoAnswer) " (now ${item.count})" else ""
         }
         val typeChips = createCallTypeChips(entry.type) {
             selectedType = it
@@ -591,7 +774,7 @@ class MainActivity : Activity() {
         panel.addView(dateButton)
         panel.addView(timeButton)
         panel.addView(durationInput)
-        panel.addView(missedCountInput)
+        panel.addView(countInput)
         updateTypeFields()
 
         val dialog = AlertDialog.Builder(this)
@@ -603,17 +786,23 @@ class MainActivity : Activity() {
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val number = numberInput.text.toString().trim()
-                val wantedMissed = missedCountInput.text.toString().toIntOrNull()
                 if (number.isBlank()) {
                     numberInput.error = "Enter a phone number"
                     return@setOnClickListener
                 }
-                if (selectedType == CallLog.Calls.MISSED_TYPE && (wantedMissed == null || wantedMissed !in 1..500)) {
-                    missedCountInput.error = "Enter 1 to 500"
+                val noAnswer = isNoAnswerType(selectedType)
+                // Blank field = keep what the record already has.
+                val countText = countInput.text.toString().trim()
+                val wanted = if (countText.isEmpty()) (if (originalNoAnswer) item.count else 1)
+                else countText.toIntOrNull()
+                if (noAnswer && (wanted == null || wanted !in 1..500)) {
+                    countInput.error = "Enter 1 to 500"
                     return@setOnClickListener
                 }
-                val duration = durationInput.text.toString().toLongOrNull()
-                if (selectedType != CallLog.Calls.MISSED_TYPE && (duration == null || duration < 0)) {
+                val durationText = durationInput.text.toString().trim()
+                val duration = if (durationText.isEmpty()) (if (originalNoAnswer) 0L else entry.duration)
+                else durationText.toLongOrNull()
+                if (!noAnswer && (duration == null || duration < 0)) {
                     durationInput.error = "Enter duration 0 or greater"
                     return@setOnClickListener
                 }
@@ -621,13 +810,21 @@ class MainActivity : Activity() {
                     val values = ContentValues().apply {
                         put(CallLog.Calls.NUMBER, number)
                         put(CallLog.Calls.TYPE, selectedType)
-                        put(CallLog.Calls.DURATION, if (selectedType == CallLog.Calls.MISSED_TYPE) 0L else duration!!)
+                        put(CallLog.Calls.DURATION, if (noAnswer) 0L else duration!!)
                         put(CallLog.Calls.DATE, selectedDate.timeInMillis)
                     }
                     val uri = android.content.ContentUris.withAppendedId(CallLog.Calls.CONTENT_URI, entry.id)
                     val updated = contentResolver.update(uri, values, null, null)
-                    if (updated > 0 && selectedType == CallLog.Calls.MISSED_TYPE) {
-                        reconcileMissedCount(number, entry.id, wantedMissed!!, selectedDate.timeInMillis)
+                    if (updated > 0) {
+                        val sameGroup = number == entry.number && selectedType == entry.type
+                        // Group was moved to another number/type (or turned into a normal
+                        // call): remove the old siblings so nothing is left behind.
+                        if (!(sameGroup && noAnswer)) {
+                            item.rows.filter { it.id != entry.id }.forEach { deleteById(it.id) }
+                        }
+                        if (noAnswer) {
+                            reconcileCount(number, selectedType, entry.id, wanted!!, selectedDate.timeInMillis)
+                        }
                     }
                     Toast.makeText(this, if (updated > 0) "Record updated" else "Android did not update this record", Toast.LENGTH_LONG).show()
                     dialog.dismiss()
@@ -640,7 +837,8 @@ class MainActivity : Activity() {
         dialog.show()
     }
 
-    private fun addNewEntry() {
+    // prefill != null → "Copy": opens the form with that record's values filled in.
+    private fun addNewEntry(prefill: DisplayItem? = null) {
         if (!has(Manifest.permission.WRITE_CALL_LOG)) {
             AlertDialog.Builder(this)
                 .setTitle("Write permission unavailable")
@@ -649,7 +847,7 @@ class MainActivity : Activity() {
                 .setNegativeButton("Cancel", null).show()
             return
         }
-
+        val src = prefill?.rep
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 8, 24, 0)
@@ -657,9 +855,10 @@ class MainActivity : Activity() {
         val numberInput = EditText(this).apply {
             hint = "Phone number (required)"
             inputType = android.text.InputType.TYPE_CLASS_PHONE
+            if (src != null) setText(src.number)
         }
-        var selectedType = CallLog.Calls.INCOMING_TYPE
-        val selectedDate = java.util.Calendar.getInstance()
+        var selectedType = src?.type ?: CallLog.Calls.INCOMING_TYPE
+        val selectedDate = java.util.Calendar.getInstance().apply { if (src != null) timeInMillis = src.date }
         val dateButton = Button(this).apply { text = "DATE  ·  " + SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(selectedDate.time) }
         dateButton.setOnClickListener {
             DatePickerDialog(this, { _, y, m, d ->
@@ -669,20 +868,21 @@ class MainActivity : Activity() {
         }
         val timeButton = Button(this).apply { text = "TIME  ·  " + SimpleDateFormat("hh:mm a", Locale.getDefault()).format(selectedDate.time) }
         timeButton.setOnClickListener { showAnalogTimePicker(selectedDate) { timeButton.text = "TIME  ·  " + SimpleDateFormat("hh:mm a", Locale.getDefault()).format(selectedDate.time) } }
+        // Fields start empty: the hint only tells what the field is.
         val durationInput = EditText(this).apply {
             hint = "Duration in seconds"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setText("0")
+            if (src != null && !isNoAnswerType(src.type)) setText(src.duration.toString())
         }
-        val missedCountInput = EditText(this).apply {
-            hint = "X Times Get Missed"
+        val countInput = EditText(this).apply {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setText("1")
+            if (prefill != null && prefill.grouped) setText(prefill.count.toString())
         }
         val updateTypeFields = {
-            val missed = selectedType == CallLog.Calls.MISSED_TYPE
-            durationInput.visibility = if (missed) View.GONE else View.VISIBLE
-            missedCountInput.visibility = if (missed) View.VISIBLE else View.GONE
+            val noAnswer = isNoAnswerType(selectedType)
+            durationInput.visibility = if (noAnswer) View.GONE else View.VISIBLE
+            countInput.visibility = if (noAnswer) View.VISIBLE else View.GONE
+            countInput.hint = "X Times Get ${typeName(selectedType)}"
         }
         val typeChips = createCallTypeChips(selectedType) {
             selectedType = it
@@ -693,11 +893,11 @@ class MainActivity : Activity() {
         panel.addView(dateButton)
         panel.addView(timeButton)
         panel.addView(durationInput)
-        panel.addView(missedCountInput)
+        panel.addView(countInput)
         updateTypeFields()
 
         AlertDialog.Builder(this)
-            .setTitle("New manual call-log entry")
+            .setTitle(if (prefill != null) "Copy call-log entry" else "New manual call-log entry")
             .setMessage("This creates a manually entered record, not proof that a call actually occurred. Android may reject the insert.")
             .setView(panel)
             .setPositiveButton("Create entry", null)
@@ -706,36 +906,36 @@ class MainActivity : Activity() {
                 dialog.setOnShowListener {
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                         val number = numberInput.text.toString().trim()
-                        val duration = durationInput.text.toString().toLongOrNull()
-                        val missedTimes = missedCountInput.text.toString().toIntOrNull()
+                        val duration = durationInput.text.toString().trim().toLongOrNull()
+                        val times = countInput.text.toString().trim().toIntOrNull()
+                        val noAnswer = isNoAnswerType(selectedType)
                         if (number.isBlank()) {
                             numberInput.error = "Enter a phone number"
                             return@setOnClickListener
                         }
-                        if (selectedType == CallLog.Calls.MISSED_TYPE &&
-                            (missedTimes == null || missedTimes !in 1..500)) {
-                            missedCountInput.error = "Enter 1 to 500"
+                        if (noAnswer && (times == null || times !in 1..500)) {
+                            countInput.error = "Enter 1 to 500"
                             return@setOnClickListener
                         }
-                        if (selectedType != CallLog.Calls.MISSED_TYPE && (duration == null || duration < 0)) {
+                        if (!noAnswer && (duration == null || duration < 0)) {
                             durationInput.error = "Enter duration 0 or greater"
                             return@setOnClickListener
                         }
                         try {
-                            val total = if (selectedType == CallLog.Calls.MISSED_TYPE) missedTimes!! else 1
+                            val total = if (noAnswer) times!! else 1
                             var created = 0
                             repeat(total) { index ->
                                 val values = ContentValues().apply {
                                     put(CallLog.Calls.NUMBER, number)
                                     put(CallLog.Calls.TYPE, selectedType)
                                     put(CallLog.Calls.DATE, selectedDate.timeInMillis - index * 1000L)
-                                    put(CallLog.Calls.DURATION, if (selectedType == CallLog.Calls.MISSED_TYPE) 0L else duration!!)
+                                    put(CallLog.Calls.DURATION, if (noAnswer) 0L else duration!!)
                                     put(CallLog.Calls.NEW, 1)
                                 }
                                 if (contentResolver.insert(CallLog.Calls.CONTENT_URI, values) != null) created++
                             }
                             if (created > 0) {
-                                Toast.makeText(this, if (selectedType == CallLog.Calls.MISSED_TYPE) "$created missed calls added" else "Manual entry created", Toast.LENGTH_LONG).show()
+                                Toast.makeText(this, if (noAnswer) "$created ${typeName(selectedType).lowercase()} calls added" else "Manual entry created", Toast.LENGTH_LONG).show()
                                 dialog.dismiss()
                                 loadCalls()
                             } else {
@@ -799,30 +999,225 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun confirmDelete(entry: CallEntry) {
+    private fun confirmDelete(item: DisplayItem) {
+        val n = item.count
         AlertDialog.Builder(this)
-            .setTitle("Delete call record?")
-            .setMessage("This removes the selected record from this device's call history if Android permits it.")
+            .setTitle(if (n > 1) "Delete $n call records?" else "Delete call record?")
+            .setMessage(
+                if (n > 1) "This removes all $n records of this group from this device's call history if Android permits it."
+                else "This removes the selected record from this device's call history if Android permits it."
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ -> deleteItems(listOf(item)) }
+            .show()
+    }
+
+    private fun confirmDeleteSelected() {
+        val items = currentItems.filter { it.key in selectedKeys }
+        if (items.isEmpty()) return
+        val rows = items.sumOf { it.count }
+        AlertDialog.Builder(this)
+            .setTitle("Delete $rows call records?")
+            .setMessage("This removes the selected records from this device's call history if Android permits it.")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Delete") { _, _ ->
-                if (!has(Manifest.permission.WRITE_CALL_LOG)) {
-                    Toast.makeText(this, "WRITE_CALL_LOG permission not granted", Toast.LENGTH_LONG).show()
-                    return@setPositiveButton
+                selectMode = false
+                selectedKeys.clear()
+                deleteItems(items)
+                updateSelectBar()
+            }
+            .show()
+    }
+
+    private fun deleteItems(items: List<DisplayItem>) {
+        if (!has(Manifest.permission.WRITE_CALL_LOG)) {
+            Toast.makeText(this, "WRITE_CALL_LOG permission not granted", Toast.LENGTH_LONG).show()
+            return
+        }
+        val removed = mutableListOf<CallEntry>()
+        var failed = 0
+        try {
+            // Collection URI with an _ID selection: some OEM CallLog providers
+            // reject deletion through an item URI.
+            items.flatMap { it.rows }.forEach { row ->
+                if (deleteById(row.id) > 0) removed.add(row) else failed++
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Delete blocked: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+        if (removed.isNotEmpty()) {
+            lastDeleted = removed
+            showUndo(if (removed.size == 1) "Record deleted" else "${removed.size} records deleted")
+        }
+        if (failed > 0) {
+            Toast.makeText(this, "Android did not delete $failed record(s)", Toast.LENGTH_LONG).show()
+        }
+        loadCalls()
+    }
+
+    private fun showUndo(message: String) {
+        undoText.text = message
+        undoBar.visibility = View.VISIBLE
+        undoBar.removeCallbacks(hideUndo)
+        undoBar.postDelayed(hideUndo, 5000L)
+    }
+
+    private fun restoreDeleted() {
+        val rows = lastDeleted
+        lastDeleted = emptyList()
+        undoBar.removeCallbacks(hideUndo)
+        undoBar.visibility = View.GONE
+        if (rows.isEmpty()) return
+        var ok = 0
+        try {
+            rows.forEach { r ->
+                val values = ContentValues().apply {
+                    put(CallLog.Calls.NUMBER, r.number)
+                    put(CallLog.Calls.TYPE, r.type)
+                    put(CallLog.Calls.DATE, r.date)
+                    put(CallLog.Calls.DURATION, r.duration)
+                    put(CallLog.Calls.NEW, 0)
                 }
-                try {
-                    // Use the collection URI with an _ID selection. Some OEM
-                    // CallLog providers reject deletion through an item URI.
-                    val count = contentResolver.delete(
-                        CallLog.Calls.CONTENT_URI,
-                        "${CallLog.Calls._ID} = ?",
-                        arrayOf(entry.id.toString())
-                    )
-                    Toast.makeText(this, if (count > 0) "Record deleted" else "Android did not delete this record", Toast.LENGTH_LONG).show()
-                    loadCalls()
-                } catch (e: Exception) {
-                    Toast.makeText(this, "Delete blocked: ${e.message}", Toast.LENGTH_LONG).show()
+                if (contentResolver.insert(CallLog.Calls.CONTENT_URI, values) != null) ok++
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Restore failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+        Toast.makeText(this, "Restored $ok of ${rows.size}", Toast.LENGTH_LONG).show()
+        loadCalls()
+    }
+}
+
+private class SwipeRow(
+    context: Context,
+    private val front: View,
+    back: View,
+    private val onSwipeRight: () -> Unit,
+    private val onSwipeLeft: () -> Unit,
+    private val onLongPress: () -> Unit,
+    private val onTap: () -> Unit
+) : FrameLayout(context) {
+    var swipeEnabled = true
+    private val slop = ViewConfiguration.get(context).scaledTouchSlop
+    private var downX = 0f
+    private var downY = 0f
+    private var dragging = false
+    private var longFired = false
+    private val longPressRunnable = Runnable {
+        if (swipeEnabled && !dragging) {
+            longFired = true
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            onLongPress()
+        }
+    }
+
+    init {
+        addView(back, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        addView(front, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+    }
+
+    private fun startPress(ev: MotionEvent) {
+        downX = ev.x
+        downY = ev.y
+        dragging = false
+        longFired = false
+        removeCallbacks(longPressRunnable)
+        postDelayed(longPressRunnable, ViewConfiguration.getLongPressTimeout().toLong())
+    }
+
+    private fun beginDrag() {
+        dragging = true
+        removeCallbacks(longPressRunnable)
+        parent?.requestDisallowInterceptTouchEvent(true)
+    }
+
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> startPress(ev)
+            MotionEvent.ACTION_MOVE -> {
+                val dx = ev.x - downX
+                val dy = ev.y - downY
+                if (swipeEnabled && !dragging && abs(dx) > slop && abs(dx) > abs(dy)) {
+                    beginDrag()
+                    return true
                 }
-            }.show()
+                if (abs(dx) > slop || abs(dy) > slop) removeCallbacks(longPressRunnable)
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> removeCallbacks(longPressRunnable)
+        }
+        return false
+    }
+
+    override fun onTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> return true
+            MotionEvent.ACTION_MOVE -> {
+                val dx = ev.x - downX
+                val dy = ev.y - downY
+                if (!dragging && swipeEnabled && abs(dx) > slop && abs(dx) > abs(dy)) beginDrag()
+                if (dragging) front.translationX = dx
+                else if (abs(dx) > slop || abs(dy) > slop) removeCallbacks(longPressRunnable)
+            }
+            MotionEvent.ACTION_UP -> {
+                removeCallbacks(longPressRunnable)
+                val dx = ev.x - downX
+                if (dragging) {
+                    dragging = false
+                    val threshold = width * 0.28f
+                    front.animate().translationX(0f).setDuration(180).start()
+                    if (dx <= -threshold) onSwipeLeft() else if (dx >= threshold) onSwipeRight()
+                } else if (!longFired && abs(dx) < slop && abs(ev.y - downY) < slop) {
+                    onTap()
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                removeCallbacks(longPressRunnable)
+                if (dragging) {
+                    dragging = false
+                    front.animate().translationX(0f).setDuration(180).start()
+                }
+            }
+        }
+        return true
+    }
+}
+
+// Small monochrome call-type icons drawn on a 24x24 grid.
+private class CallTypeIcon(context: Context, private val type: Int, tint: Int) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        color = tint
+    }
+
+    override fun onDraw(c: Canvas) {
+        val s = width / 24f
+        paint.strokeWidth = 2.2f * s
+        fun ln(x1: Float, y1: Float, x2: Float, y2: Float) =
+            c.drawLine(x1 * s, y1 * s, x2 * s, y2 * s, paint)
+        when (type) {
+            android.provider.CallLog.Calls.INCOMING_TYPE -> {
+                ln(18f, 6f, 6f, 18f); ln(6f, 18f, 6f, 10f); ln(6f, 18f, 14f, 18f)
+            }
+            android.provider.CallLog.Calls.OUTGOING_TYPE -> {
+                ln(6f, 18f, 18f, 6f); ln(18f, 6f, 18f, 14f); ln(18f, 6f, 10f, 6f)
+            }
+            android.provider.CallLog.Calls.MISSED_TYPE -> {
+                ln(14f, 10f, 5f, 19f); ln(5f, 19f, 5f, 12f); ln(5f, 19f, 12f, 19f)
+                ln(15f, 3f, 21f, 9f); ln(21f, 3f, 15f, 9f)
+            }
+            android.provider.CallLog.Calls.REJECTED_TYPE -> {
+                c.drawCircle(12f * s, 12f * s, 9f * s, paint); ln(7f, 12f, 17f, 12f)
+            }
+            android.provider.CallLog.Calls.BLOCKED_TYPE -> {
+                c.drawCircle(12f * s, 12f * s, 9f * s, paint); ln(5.6f, 5.6f, 18.4f, 18.4f)
+            }
+            else -> c.drawCircle(12f * s, 12f * s, 9f * s, paint)
+        }
     }
 }
 
