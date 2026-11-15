@@ -22,6 +22,7 @@ android {
         if (stableKeystore != null && stableKeystore.exists()) {
             create("stable") {
                 storeFile = stableKeystore
+                storeType = "PKCS12"
                 storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("ANDROID_KEY_ALIAS")
                 keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
