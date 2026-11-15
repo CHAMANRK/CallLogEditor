@@ -16,7 +16,7 @@ jobs:
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       VERSION_CODE: ${{ github.run_number }}
-      VERSION_NAME: 0.2.${{ github.run_number }}
+      VERSION_NAME: 0.4.${{ github.run_number }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

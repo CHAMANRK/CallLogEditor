@@ -64,3 +64,9 @@ The earlier CI workflow built debug APKs using GitHub runner-generated debug sig
 ## Android call-log restrictions
 
 `READ_CALL_LOG` and `WRITE_CALL_LOG` are restricted Android permissions. Runtime prompts do not guarantee that Android or the device manufacturer will grant write/insert/delete access. The app must report provider/permission failures rather than bypass platform security.
+
+
+## v0.4 UI update
+- Missed calls are grouped by phone number and show the total count.
+- Edit and New Entry date/time controls include a draggable analog clock dial for hour and minute selection.
+- Date remains selected with the calendar date control.
