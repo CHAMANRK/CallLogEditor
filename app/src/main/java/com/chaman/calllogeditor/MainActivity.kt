@@ -124,7 +124,7 @@ class MainActivity : Activity() {
             textSize = 14f
             setTextColor(ink)
             setHintTextColor(muted)
-            singleLine = true
+            setSingleLine(true)
             background = null
             setPadding(dp(10), dp(13), dp(4), dp(13))
             addTextChangedListener(object : android.text.TextWatcher {
