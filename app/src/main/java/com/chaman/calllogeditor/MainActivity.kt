@@ -37,6 +37,7 @@ class MainActivity : Activity() {
     private val requestCode = 410
     private var searchBox: EditText? = null
     private var activeFilter: String = "All"
+    private val filterChips = linkedMapOf<String, TextView>()
     private val ink = 0xFF171717.toInt()
     private val muted = 0xFF777777.toInt()
     private val paper = 0xFFF5F5F2.toInt()
@@ -142,6 +143,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(14), 0, dp(14))
         }
+        filterChips.clear()
         listOf("All", "Incoming", "Outgoing", "Missed").forEach { filter ->
             val chip = TextView(this).apply {
                 text = filter
@@ -153,11 +155,14 @@ class MainActivity : Activity() {
                 background = rounded(if (activeFilter == filter) ink else 0xFFFFFFFF.toInt(), 30,
                     if (activeFilter == filter) ink else line)
                 setOnClickListener {
+                    if (activeFilter == filter) return@setOnClickListener
                     activeFilter = filter
-                    buildUi()
-                    renderEntries()
+                    updateFilterChips()
+                    showListLoading()
+                    list.postDelayed({ renderEntries() }, 140)
                 }
             }
+            filterChips[filter] = chip
             val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36))
             lp.marginEnd = dp(7)
             filters.addView(chip, lp)
@@ -210,6 +215,33 @@ class MainActivity : Activity() {
         page.addView(bottom)
 
         setContentView(page)
+    }
+
+    private fun updateFilterChips() {
+        filterChips.forEach { (filter, chip) ->
+            val selected = activeFilter == filter
+            chip.setTextColor(if (selected) 0xFFFFFFFF.toInt() else ink)
+            chip.background = rounded(if (selected) ink else 0xFFFFFFFF.toInt(), 30,
+                if (selected) ink else line)
+        }
+    }
+
+    private fun showListLoading() {
+        if (!::list.isInitialized) return
+        list.removeAllViews()
+        val loading = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(20), dp(28), dp(20), dp(28))
+            background = rounded(0xFFFFFFFF.toInt(), 18, line)
+        }
+        loading.addView(ProgressBar(this).apply { isIndeterminate = true },
+            LinearLayout.LayoutParams(dp(24), dp(24)))
+        loading.addView(textView("Loading call history…", 13f, muted, true).apply {
+            setPadding(dp(12), 0, 0, 0)
+        })
+        list.addView(loading, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
 
     private fun has(permission: String) =
@@ -371,7 +403,7 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER_VERTICAL
             }
             val meta = if (missedCount > 0) {
-                "MISSED  ·  $missedCount ${if (missedCount == 1) "time" else "times"}"
+                "MISSED  ×  $missedCount"
             } else {
                 "${entry.duration}s duration"
             }
