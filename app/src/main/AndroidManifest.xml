@@ -4,7 +4,9 @@
 
     <application
         android:allowBackup="false"
-        android:label="Call Log Editor"
+        android:label="CHAMAN Call Log"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:supportsRtl="true">
         <activity

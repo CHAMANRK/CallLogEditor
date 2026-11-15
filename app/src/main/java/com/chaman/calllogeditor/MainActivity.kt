@@ -13,6 +13,8 @@ import android.view.ViewGroup
 import android.widget.*
 import java.text.DateFormat
 import java.util.Date
+import java.util.Locale
+import java.text.SimpleDateFormat
 
 data class CallEntry(
     val id: Long,
@@ -56,6 +58,7 @@ class MainActivity : Activity() {
         page.addView(status)
 
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        buttons.addView(makeButton("+ New Entry") { addNewEntry() })
         buttons.addView(makeButton("Grant access") { requestPermissions() })
         buttons.addView(makeButton("Refresh") { loadCalls() })
         page.addView(buttons)
@@ -268,6 +271,104 @@ class MainActivity : Activity() {
             .show()
     }
 
+
+    private fun addNewEntry() {
+        if (!has(Manifest.permission.WRITE_CALL_LOG)) {
+            AlertDialog.Builder(this)
+                .setTitle("Write permission unavailable")
+                .setMessage("Android has not granted WRITE_CALL_LOG. Request access first; Android may still restrict inserting system call records.")
+                .setPositiveButton("Request permission") { _, _ -> requestPermissions() }
+                .setNegativeButton("Cancel", null).show()
+            return
+        }
+
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 8, 24, 0)
+        }
+        val numberInput = EditText(this).apply {
+            hint = "Phone number (required)"
+            inputType = android.text.InputType.TYPE_CLASS_PHONE
+        }
+        val typeSpinner = Spinner(this)
+        val types = listOf("Incoming", "Outgoing", "Missed", "Rejected", "Blocked")
+        typeSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, types)
+        val dateInput = EditText(this).apply {
+            hint = "Date and time: yyyy-MM-dd HH:mm"
+            setText(SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date()))
+        }
+        val durationInput = EditText(this).apply {
+            hint = "Duration in seconds"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText("0")
+        }
+        panel.addView(numberInput)
+        panel.addView(typeSpinner)
+        panel.addView(dateInput)
+        panel.addView(durationInput)
+
+        AlertDialog.Builder(this)
+            .setTitle("New manual call-log entry")
+            .setMessage("This creates a manually entered record, not proof that a call actually occurred. Android may reject the insert.")
+            .setView(panel)
+            .setPositiveButton("Create entry", null)
+            .setNegativeButton("Cancel", null)
+            .create().also { dialog ->
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val number = numberInput.text.toString().trim()
+                        val parsedDate = try {
+                            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).apply {
+                                isLenient = false
+                            }.parse(dateInput.text.toString().trim())
+                        } catch (_: Exception) { null }
+                        val duration = durationInput.text.toString().toLongOrNull()
+                        if (number.isBlank()) {
+                            numberInput.error = "Enter a phone number"
+                            return@setOnClickListener
+                        }
+                        if (parsedDate == null) {
+                            dateInput.error = "Use yyyy-MM-dd HH:mm"
+                            return@setOnClickListener
+                        }
+                        if (duration == null || duration < 0) {
+                            durationInput.error = "Enter duration 0 or greater"
+                            return@setOnClickListener
+                        }
+                        val callType = when (typeSpinner.selectedItemPosition) {
+                            1 -> CallLog.Calls.OUTGOING_TYPE
+                            2 -> CallLog.Calls.MISSED_TYPE
+                            3 -> CallLog.Calls.REJECTED_TYPE
+                            4 -> CallLog.Calls.BLOCKED_TYPE
+                            else -> CallLog.Calls.INCOMING_TYPE
+                        }
+                        val values = ContentValues().apply {
+                            put(CallLog.Calls.NUMBER, number)
+                            put(CallLog.Calls.TYPE, callType)
+                            put(CallLog.Calls.DATE, parsedDate.time)
+                            put(CallLog.Calls.DURATION, duration)
+                            put(CallLog.Calls.NEW, 1)
+                        }
+                        try {
+                            val uri = contentResolver.insert(CallLog.Calls.CONTENT_URI, values)
+                            if (uri != null) {
+                                Toast.makeText(this, "Manual entry created", Toast.LENGTH_LONG).show()
+                                dialog.dismiss()
+                                loadCalls()
+                            } else {
+                                Toast.makeText(this, "Android did not create the entry", Toast.LENGTH_LONG).show()
+                            }
+                        } catch (e: SecurityException) {
+                            Toast.makeText(this, "Android blocked insertion: ${e.message}", Toast.LENGTH_LONG).show()
+                        } catch (e: Exception) {
+                            Toast.makeText(this, "Could not create entry: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+                dialog.show()
+            }
+    }
+
     private fun confirmDelete(entry: CallEntry) {
         AlertDialog.Builder(this)
             .setTitle("Delete call record?")
@@ -279,8 +380,13 @@ class MainActivity : Activity() {
                     return@setPositiveButton
                 }
                 try {
-                    val uri = android.content.ContentUris.withAppendedId(CallLog.Calls.CONTENT_URI, entry.id)
-                    val count = contentResolver.delete(uri, null, null)
+                    // Use the collection URI with an _ID selection. Some OEM
+                    // CallLog providers reject deletion through an item URI.
+                    val count = contentResolver.delete(
+                        CallLog.Calls.CONTENT_URI,
+                        "${CallLog.Calls._ID} = ?",
+                        arrayOf(entry.id.toString())
+                    )
                     Toast.makeText(this, if (count > 0) "Record deleted" else "Android did not delete this record", Toast.LENGTH_LONG).show()
                     loadCalls()
                 } catch (e: Exception) {
