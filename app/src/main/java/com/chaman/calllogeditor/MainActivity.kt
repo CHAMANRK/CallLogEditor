@@ -450,6 +450,90 @@ class MainActivity : Activity() {
         else -> "Other"
     }
 
+    private fun createCallTypeChips(initialType: Int, onSelected: (Int) -> Unit): HorizontalScrollView {
+        val options = listOf(
+            "Incoming" to CallLog.Calls.INCOMING_TYPE,
+            "Outgoing" to CallLog.Calls.OUTGOING_TYPE,
+            "Missed" to CallLog.Calls.MISSED_TYPE,
+            "Rejected" to CallLog.Calls.REJECTED_TYPE,
+            "Blocked" to CallLog.Calls.BLOCKED_TYPE
+        )
+        var selected = initialType
+        val chips = mutableMapOf<Int, TextView>()
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        fun refresh() {
+            chips.forEach { (type, chip) ->
+                val active = type == selected
+                chip.setTextColor(if (active) 0xFFFFFFFF.toInt() else ink)
+                chip.background = rounded(if (active) ink else 0xFFFFFFFF.toInt(), 22,
+                    if (active) ink else line)
+            }
+        }
+        options.forEach { (label, type) ->
+            val chip = TextView(this).apply {
+                text = label
+                textSize = 12f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                setOnClickListener {
+                    selected = type
+                    refresh()
+                    onSelected(type)
+                }
+            }
+            chips[type] = chip
+            row.addView(chip, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(7) })
+        }
+        refresh()
+        onSelected(selected)
+        return HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(row)
+        }
+    }
+
+    private fun missedCountForNumber(number: String): Int {
+        var count = 0
+        contentResolver.query(
+            CallLog.Calls.CONTENT_URI,
+            arrayOf(CallLog.Calls._ID),
+            "${CallLog.Calls.NUMBER} = ? AND ${CallLog.Calls.TYPE} = ?",
+            arrayOf(number, CallLog.Calls.MISSED_TYPE.toString()), null
+        )?.use { count = it.count }
+        return count
+    }
+
+    private fun reconcileMissedCount(number: String, keepId: Long, wanted: Int, date: Long) {
+        val ids = mutableListOf<Long>()
+        contentResolver.query(
+            CallLog.Calls.CONTENT_URI, arrayOf(CallLog.Calls._ID),
+            "${CallLog.Calls.NUMBER} = ? AND ${CallLog.Calls.TYPE} = ?",
+            arrayOf(number, CallLog.Calls.MISSED_TYPE.toString()), "${CallLog.Calls.DATE} DESC"
+        )?.use { c -> while (c.moveToNext()) ids.add(c.getLong(0)) }
+        val keep = mutableListOf<Long>()
+        if (keepId in ids) keep.add(keepId)
+        ids.filter { it != keepId }.forEach { if (keep.size < wanted) keep.add(it) }
+        ids.filter { it !in keep }.forEach { id ->
+            contentResolver.delete(CallLog.Calls.CONTENT_URI, "${CallLog.Calls._ID} = ?", arrayOf(id.toString()))
+        }
+        repeat((wanted - keep.size).coerceAtLeast(0)) { index ->
+            val values = ContentValues().apply {
+                put(CallLog.Calls.NUMBER, number)
+                put(CallLog.Calls.TYPE, CallLog.Calls.MISSED_TYPE)
+                put(CallLog.Calls.DATE, date - (index + 1) * 1000L)
+                put(CallLog.Calls.DURATION, 0L)
+                put(CallLog.Calls.NEW, 1)
+            }
+            contentResolver.insert(CallLog.Calls.CONTENT_URI, values)
+        }
+    }
+
     private fun editEntry(entry: CallEntry) {
         if (!has(Manifest.permission.WRITE_CALL_LOG)) {
             AlertDialog.Builder(this)
@@ -459,81 +543,102 @@ class MainActivity : Activity() {
                 .setNegativeButton("Cancel", null).show()
             return
         }
-
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 8, 24, 0)
         }
-        val numberInput = EditText(this).apply {
-            hint = "Phone number"
-            setText(entry.number)
-        }
+        val numberInput = EditText(this).apply { hint = "Phone number"; setText(entry.number) }
         val durationInput = EditText(this).apply {
             hint = "Duration in seconds"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             setText(entry.duration.toString())
         }
+        val missedCountInput = EditText(this).apply {
+            hint = "X Times Get Missed"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(missedCountForNumber(entry.number).coerceAtLeast(1).toString())
+        }
         val selectedDate = java.util.Calendar.getInstance().apply { timeInMillis = entry.date }
-        val dateButton = Button(this).apply { text = "DATE  ·  " + SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(entry.date)) }
+        val dateButton = Button(this).apply {
+            text = "DATE  ·  " + SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(entry.date))
+        }
         dateButton.setOnClickListener {
             DatePickerDialog(this, { _, y, m, d ->
                 selectedDate.set(y, m, d)
                 dateButton.text = "DATE  ·  " + SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(selectedDate.time)
             }, selectedDate.get(java.util.Calendar.YEAR), selectedDate.get(java.util.Calendar.MONTH), selectedDate.get(java.util.Calendar.DAY_OF_MONTH)).show()
         }
-        val timeButton = Button(this).apply { text = "TIME  ·  " + SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(entry.date)) }
-        timeButton.setOnClickListener { showAnalogTimePicker(selectedDate) { timeButton.text = "TIME  ·  " + SimpleDateFormat("hh:mm a", Locale.getDefault()).format(selectedDate.time) } }
-
-        val typeSpinner = Spinner(this)
-        val types = listOf("Incoming", "Outgoing", "Missed", "Rejected", "Blocked")
-        typeSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, types)
-        typeSpinner.setSelection(
-            when (entry.type) {
-                CallLog.Calls.OUTGOING_TYPE -> 1
-                CallLog.Calls.MISSED_TYPE -> 2
-                CallLog.Calls.REJECTED_TYPE -> 3
-                CallLog.Calls.BLOCKED_TYPE -> 4
-                else -> 0
+        val timeButton = Button(this).apply {
+            text = "TIME  ·  " + SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(entry.date))
+        }
+        timeButton.setOnClickListener {
+            showAnalogTimePicker(selectedDate) {
+                timeButton.text = "TIME  ·  " + SimpleDateFormat("hh:mm a", Locale.getDefault()).format(selectedDate.time)
             }
-        )
+        }
+        var selectedType = entry.type
+        val updateTypeFields = {
+            val missed = selectedType == CallLog.Calls.MISSED_TYPE
+            durationInput.visibility = if (missed) View.GONE else View.VISIBLE
+            missedCountInput.visibility = if (missed) View.VISIBLE else View.GONE
+        }
+        val typeChips = createCallTypeChips(entry.type) {
+            selectedType = it
+            updateTypeFields()
+        }
         panel.addView(numberInput)
-        panel.addView(typeSpinner)
+        panel.addView(typeChips)
         panel.addView(dateButton)
         panel.addView(timeButton)
         panel.addView(durationInput)
+        panel.addView(missedCountInput)
+        updateTypeFields()
 
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle("Edit call record")
             .setView(panel)
-            .setPositiveButton("Save") { _, _ ->
-                val values = ContentValues().apply {
-                    put(CallLog.Calls.NUMBER, numberInput.text.toString())
-                    val selectedType = when (typeSpinner.selectedItemPosition) {
-                        1 -> CallLog.Calls.OUTGOING_TYPE
-                        2 -> CallLog.Calls.MISSED_TYPE
-                        3 -> CallLog.Calls.REJECTED_TYPE
-                        4 -> CallLog.Calls.BLOCKED_TYPE
-                        else -> CallLog.Calls.INCOMING_TYPE
-                    }
-                    put(CallLog.Calls.TYPE, selectedType)
-                    put(CallLog.Calls.DURATION, if (selectedType == CallLog.Calls.MISSED_TYPE) 0L else (durationInput.text.toString().toLongOrNull() ?: entry.duration))
-                    put(CallLog.Calls.DATE, selectedDate.timeInMillis)
+            .setPositiveButton("Save", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val number = numberInput.text.toString().trim()
+                val wantedMissed = missedCountInput.text.toString().toIntOrNull()
+                if (number.isBlank()) {
+                    numberInput.error = "Enter a phone number"
+                    return@setOnClickListener
+                }
+                if (selectedType == CallLog.Calls.MISSED_TYPE && (wantedMissed == null || wantedMissed !in 1..500)) {
+                    missedCountInput.error = "Enter 1 to 500"
+                    return@setOnClickListener
+                }
+                val duration = durationInput.text.toString().toLongOrNull()
+                if (selectedType != CallLog.Calls.MISSED_TYPE && (duration == null || duration < 0)) {
+                    durationInput.error = "Enter duration 0 or greater"
+                    return@setOnClickListener
                 }
                 try {
+                    val values = ContentValues().apply {
+                        put(CallLog.Calls.NUMBER, number)
+                        put(CallLog.Calls.TYPE, selectedType)
+                        put(CallLog.Calls.DURATION, if (selectedType == CallLog.Calls.MISSED_TYPE) 0L else duration!!)
+                        put(CallLog.Calls.DATE, selectedDate.timeInMillis)
+                    }
                     val uri = android.content.ContentUris.withAppendedId(CallLog.Calls.CONTENT_URI, entry.id)
-                    val count = contentResolver.update(uri, values, null, null)
-                    Toast.makeText(this, if (count > 0) "Record updated" else "Android did not update this record", Toast.LENGTH_LONG).show()
+                    val updated = contentResolver.update(uri, values, null, null)
+                    if (updated > 0 && selectedType == CallLog.Calls.MISSED_TYPE) {
+                        reconcileMissedCount(number, entry.id, wantedMissed!!, selectedDate.timeInMillis)
+                    }
+                    Toast.makeText(this, if (updated > 0) "Record updated" else "Android did not update this record", Toast.LENGTH_LONG).show()
+                    dialog.dismiss()
                     loadCalls()
-                } catch (e: SecurityException) {
-                    Toast.makeText(this, "Android blocked editing: ${e.message}", Toast.LENGTH_LONG).show()
                 } catch (e: Exception) {
                     Toast.makeText(this, "Update failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+        }
+        dialog.show()
     }
-
 
     private fun addNewEntry() {
         if (!has(Manifest.permission.WRITE_CALL_LOG)) {
@@ -553,9 +658,7 @@ class MainActivity : Activity() {
             hint = "Phone number (required)"
             inputType = android.text.InputType.TYPE_CLASS_PHONE
         }
-        val typeSpinner = Spinner(this)
-        val types = listOf("Incoming", "Outgoing", "Missed", "Rejected", "Blocked")
-        typeSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, types)
+        var selectedType = CallLog.Calls.INCOMING_TYPE
         val selectedDate = java.util.Calendar.getInstance()
         val dateButton = Button(this).apply { text = "DATE  ·  " + SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(selectedDate.time) }
         dateButton.setOnClickListener {
@@ -571,11 +674,27 @@ class MainActivity : Activity() {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             setText("0")
         }
+        val missedCountInput = EditText(this).apply {
+            hint = "X Times Get Missed"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText("1")
+        }
+        val updateTypeFields = {
+            val missed = selectedType == CallLog.Calls.MISSED_TYPE
+            durationInput.visibility = if (missed) View.GONE else View.VISIBLE
+            missedCountInput.visibility = if (missed) View.VISIBLE else View.GONE
+        }
+        val typeChips = createCallTypeChips(selectedType) {
+            selectedType = it
+            updateTypeFields()
+        }
         panel.addView(numberInput)
-        panel.addView(typeSpinner)
+        panel.addView(typeChips)
         panel.addView(dateButton)
         panel.addView(timeButton)
         panel.addView(durationInput)
+        panel.addView(missedCountInput)
+        updateTypeFields()
 
         AlertDialog.Builder(this)
             .setTitle("New manual call-log entry")
@@ -588,32 +707,35 @@ class MainActivity : Activity() {
                     dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                         val number = numberInput.text.toString().trim()
                         val duration = durationInput.text.toString().toLongOrNull()
+                        val missedTimes = missedCountInput.text.toString().toIntOrNull()
                         if (number.isBlank()) {
                             numberInput.error = "Enter a phone number"
                             return@setOnClickListener
                         }
-                        if (duration == null || duration < 0) {
+                        if (selectedType == CallLog.Calls.MISSED_TYPE &&
+                            (missedTimes == null || missedTimes !in 1..500)) {
+                            missedCountInput.error = "Enter 1 to 500"
+                            return@setOnClickListener
+                        }
+                        if (selectedType != CallLog.Calls.MISSED_TYPE && (duration == null || duration < 0)) {
                             durationInput.error = "Enter duration 0 or greater"
                             return@setOnClickListener
                         }
-                        val callType = when (typeSpinner.selectedItemPosition) {
-                            1 -> CallLog.Calls.OUTGOING_TYPE
-                            2 -> CallLog.Calls.MISSED_TYPE
-                            3 -> CallLog.Calls.REJECTED_TYPE
-                            4 -> CallLog.Calls.BLOCKED_TYPE
-                            else -> CallLog.Calls.INCOMING_TYPE
-                        }
-                        val values = ContentValues().apply {
-                            put(CallLog.Calls.NUMBER, number)
-                            put(CallLog.Calls.TYPE, callType)
-                            put(CallLog.Calls.DATE, selectedDate.timeInMillis)
-                            put(CallLog.Calls.DURATION, if (callType == CallLog.Calls.MISSED_TYPE) 0L else duration)
-                            put(CallLog.Calls.NEW, 1)
-                        }
                         try {
-                            val uri = contentResolver.insert(CallLog.Calls.CONTENT_URI, values)
-                            if (uri != null) {
-                                Toast.makeText(this, "Manual entry created", Toast.LENGTH_LONG).show()
+                            val total = if (selectedType == CallLog.Calls.MISSED_TYPE) missedTimes!! else 1
+                            var created = 0
+                            repeat(total) { index ->
+                                val values = ContentValues().apply {
+                                    put(CallLog.Calls.NUMBER, number)
+                                    put(CallLog.Calls.TYPE, selectedType)
+                                    put(CallLog.Calls.DATE, selectedDate.timeInMillis - index * 1000L)
+                                    put(CallLog.Calls.DURATION, if (selectedType == CallLog.Calls.MISSED_TYPE) 0L else duration!!)
+                                    put(CallLog.Calls.NEW, 1)
+                                }
+                                if (contentResolver.insert(CallLog.Calls.CONTENT_URI, values) != null) created++
+                            }
+                            if (created > 0) {
+                                Toast.makeText(this, if (selectedType == CallLog.Calls.MISSED_TYPE) "$created missed calls added" else "Manual entry created", Toast.LENGTH_LONG).show()
                                 dialog.dismiss()
                                 loadCalls()
                             } else {
