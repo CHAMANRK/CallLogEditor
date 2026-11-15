@@ -13,7 +13,7 @@ android {
     defaultConfig {
         applicationId = "com.chaman.calllogeditor"
         minSdk = 26
-        targetSdk = 28
+        targetSdk = 35
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
         versionName = System.getenv("VERSION_NAME") ?: "0.2.0"
     }
