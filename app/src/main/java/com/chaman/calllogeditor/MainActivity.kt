@@ -72,15 +72,64 @@ class MainActivity : Activity() {
     private var searchBox: EditText? = null
     private var activeFilter: String = "All"
     private val filterChips = linkedMapOf<String, TextView>()
-    private val ink = 0xFF171717.toInt()
-    private val muted = 0xFF777777.toInt()
-    private val paper = 0xFFF5F5F2.toInt()
-    private val line = 0xFFE7E7E2.toInt()
+    // Palette: filled by applyPalette() (light / dark) before the UI is built.
+    private var darkTheme = false
+    private var ink = 0          // main text, selected chip background
+    private var onInk = 0        // text drawn on top of ink
+    private var muted = 0
+    private var paper = 0        // page background
+    private var line = 0
+    private var cardBg = 0         // cards, search box, idle chips
+    private var cardSel = 0      // selected card
+    private var soft = 0         // small buttons, avatar background
+    private var softBack = 0     // swipe background
+    private var danger = 0
+    private var dangerBg = 0
+    private var panelBg = 0        // dark panels: summary, select bar, undo bar
+    private var panelBtn = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        applyPalette()
+        // dialogs, date picker and text fields follow the activity theme
+        setTheme(if (darkTheme) R.style.AppDark else R.style.AppLight)
         super.onCreate(savedInstanceState)
         buildUi()
         checkPermissionsAndLoad()
+    }
+
+    // 0 = follow system, 1 = light, 2 = dark
+    private fun themeMode(): Int =
+        getSharedPreferences("calllog_ui", MODE_PRIVATE).getInt("theme_mode", 0)
+
+    private fun resolveDark(): Boolean = when (themeMode()) {
+        1 -> false
+        2 -> true
+        else -> (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+    }
+
+    private fun applyPalette() {
+        darkTheme = resolveDark()
+        if (darkTheme) {
+            ink = 0xFFF2F2F2.toInt(); onInk = 0xFF141414.toInt(); muted = 0xFFA0A0A0.toInt()
+            paper = 0xFF0E0E0E.toInt(); line = 0xFF2E2E2E.toInt(); cardBg = 0xFF1A1A1A.toInt()
+            cardSel = 0xFF262626.toInt(); soft = 0xFF2A2A2A.toInt(); softBack = 0xFF2A2A2A.toInt()
+            danger = 0xFFE57373.toInt(); dangerBg = 0xFF3A2222.toInt()
+            panelBg = 0xFF2C2C2C.toInt(); panelBtn = 0xFF444444.toInt()
+        } else {
+            ink = 0xFF171717.toInt(); onInk = 0xFFFFFFFF.toInt(); muted = 0xFF777777.toInt()
+            paper = 0xFFF5F5F2.toInt(); line = 0xFFE7E7E2.toInt(); cardBg = 0xFFFFFFFF.toInt()
+            cardSel = 0xFFEFEFEA.toInt(); soft = 0xFFF2F2EF.toInt(); softBack = 0xFFE9E9E4.toInt()
+            danger = 0xFF8A2929.toInt(); dangerBg = 0xFFF8EEEE.toInt()
+            panelBg = 0xFF202020.toInt(); panelBtn = 0xFF3A3A3A.toInt()
+        }
+    }
+
+    private fun cycleTheme() {
+        val next = (themeMode() + 1) % 3
+        getSharedPreferences("calllog_ui", MODE_PRIVATE).edit().putInt("theme_mode", next).apply()
+        Toast.makeText(this, "Theme: " + listOf("System", "Light", "Dark")[next], Toast.LENGTH_SHORT).show()
+        recreate()
     }
 
 
@@ -121,12 +170,22 @@ class MainActivity : Activity() {
         })
         top.addView(brand, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
+        val themeBtn = TextView(this).apply {
+            text = "◐"
+            textSize = 24f
+            gravity = Gravity.CENTER
+            setTextColor(ink)
+            contentDescription = "Theme: system, light or dark"
+            background = rounded(cardBg, 16, line)
+            setOnClickListener { cycleTheme() }
+        }
+        top.addView(themeBtn, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginEnd = dp(8) })
         val refresh = TextView(this).apply {
             text = "↻"
             textSize = 26f
             gravity = Gravity.CENTER
             setTextColor(ink)
-            background = rounded(0xFFFFFFFF.toInt(), 16, line)
+            background = rounded(cardBg, 16, line)
             setOnClickListener { loadCalls() }
         }
         top.addView(refresh, LinearLayout.LayoutParams(dp(48), dp(48)))
@@ -135,7 +194,7 @@ class MainActivity : Activity() {
         val summary = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(16), dp(18), dp(16))
-            background = rounded(0xFF202020.toInt(), 20)
+            background = rounded(panelBg, 20)
         }
         summary.addView(textView("YOUR CALL RECORDS", 10f, 0xFFBDBDBD.toInt(), true))
         status = textView("Checking permissions…", 17f, 0xFFFFFFFF.toInt(), true).apply {
@@ -151,7 +210,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(14), 0, dp(12), 0)
-            background = rounded(0xFFFFFFFF.toInt(), 15, line)
+            background = rounded(cardBg, 15, line)
         }
         searchWrap.addView(textView("⌕", 25f, muted, true))
         searchBox = EditText(this).apply {
@@ -185,8 +244,8 @@ class MainActivity : Activity() {
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
                 gravity = Gravity.CENTER
                 setPadding(dp(13), dp(9), dp(13), dp(9))
-                setTextColor(if (activeFilter == filter) 0xFFFFFFFF.toInt() else ink)
-                background = rounded(if (activeFilter == filter) ink else 0xFFFFFFFF.toInt(), 30,
+                setTextColor(if (activeFilter == filter) onInk else ink)
+                background = rounded(if (activeFilter == filter) ink else cardBg, 30,
                     if (activeFilter == filter) ink else line)
                 setOnClickListener {
                     if (activeFilter == filter) return@setOnClickListener
@@ -241,7 +300,7 @@ class MainActivity : Activity() {
             textSize = 12f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
-            setTextColor(0xFFFFFFFF.toInt())
+            setTextColor(onInk)
             background = rounded(ink, 15)
             setOnClickListener { addNewEntry() }
         }
@@ -250,12 +309,12 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), 0, dp(8), 0)
-            background = rounded(0xFF202020.toInt(), 15)
+            background = rounded(panelBg, 15)
             visibility = View.GONE
         }
         selectCount = textView("0 selected", 13f, 0xFFFFFFFF.toInt(), true)
         selectBar.addView(selectCount, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        selectBar.addView(actionButton("CANCEL", 0xFFFFFFFF.toInt(), 0xFF3A3A3A.toInt()) { setSelectMode(false) },
+        selectBar.addView(actionButton("CANCEL", 0xFFFFFFFF.toInt(), panelBtn) { setSelectMode(false) },
             LinearLayout.LayoutParams(dp(72), dp(34)))
         selectBar.addView(actionButton("DELETE", 0xFFFFFFFF.toInt(), 0xFF8A2929.toInt()) { confirmDeleteSelected() },
             LinearLayout.LayoutParams(dp(72), dp(34)).apply { marginStart = dp(7) })
@@ -269,12 +328,12 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(8), dp(8), dp(8))
-            background = rounded(0xFF202020.toInt(), 15)
+            background = rounded(panelBg, 15)
             elevation = dp(6).toFloat()
             visibility = View.GONE
         }
         undoBar.addView(undoText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        undoBar.addView(actionButton("UNDO", 0xFFFFFFFF.toInt(), 0xFF3A3A3A.toInt()) { restoreDeleted() },
+        undoBar.addView(actionButton("UNDO", 0xFFFFFFFF.toInt(), panelBtn) { restoreDeleted() },
             LinearLayout.LayoutParams(dp(68), dp(34)))
         val root = FrameLayout(this)
         root.addView(page, FrameLayout.LayoutParams(
@@ -289,8 +348,8 @@ class MainActivity : Activity() {
     private fun updateFilterChips() {
         filterChips.forEach { (filter, chip) ->
             val selected = activeFilter == filter
-            chip.setTextColor(if (selected) 0xFFFFFFFF.toInt() else ink)
-            chip.background = rounded(if (selected) ink else 0xFFFFFFFF.toInt(), 30,
+            chip.setTextColor(if (selected) onInk else ink)
+            chip.background = rounded(if (selected) ink else cardBg, 30,
                 if (selected) ink else line)
         }
     }
@@ -302,7 +361,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(dp(20), dp(28), dp(20), dp(28))
-            background = rounded(0xFFFFFFFF.toInt(), 18, line)
+            background = rounded(cardBg, 18, line)
         }
         loading.addView(ProgressBar(this).apply { isIndeterminate = true },
             LinearLayout.LayoutParams(dp(24), dp(24)))
@@ -467,7 +526,7 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setPadding(dp(20), dp(34), dp(20), dp(34))
-                background = rounded(0xFFFFFFFF.toInt(), 18, line)
+                background = rounded(cardBg, 18, line)
             }
             empty.addView(textView("No calls found", 17f, ink, true))
             empty.addView(textView("Try another search or filter.", 12f, muted).apply {
@@ -509,7 +568,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(15), dp(14), dp(15), dp(12))
             background = rounded(
-                if (selected) 0xFFEFEFEA.toInt() else 0xFFFFFFFF.toInt(), 18,
+                if (selected) cardSel else cardBg, 18,
                 if (selected) ink else line
             )
         }
@@ -522,8 +581,8 @@ class MainActivity : Activity() {
             textSize = 17f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
-            setTextColor(if (selected) 0xFFFFFFFF.toInt() else ink)
-            background = rounded(if (selected) ink else 0xFFF0F0EC.toInt(), 15)
+            setTextColor(if (selected) onInk else ink)
+            background = rounded(if (selected) ink else soft, 15)
         }
         row.addView(avatar, LinearLayout.LayoutParams(dp(44), dp(44)))
 
@@ -564,15 +623,15 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(0, dp(36), 1f))
         if (!selectMode) {
             actions.addView(
-                actionButton("COPY", ink, 0xFFF2F2EF.toInt()) { addNewEntry(item) },
+                actionButton("COPY", ink, soft) { addNewEntry(item) },
                 LinearLayout.LayoutParams(dp(52), dp(34))
             )
             actions.addView(
-                actionButton("EDIT", ink, 0xFFF2F2EF.toInt()) { editEntry(item) },
+                actionButton("EDIT", ink, soft) { editEntry(item) },
                 LinearLayout.LayoutParams(dp(52), dp(34)).apply { marginStart = dp(6) }
             )
             actions.addView(
-                actionButton("DELETE", 0xFF8A2929.toInt(), 0xFFF8EEEE.toInt()) { confirmDelete(item) },
+                actionButton("DELETE", danger, dangerBg) { confirmDelete(item) },
                 LinearLayout.LayoutParams(dp(64), dp(34)).apply { marginStart = dp(6) }
             )
         }
@@ -582,11 +641,11 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(22), 0, dp(22), 0)
-            background = rounded(0xFFE9E9E4.toInt(), 18)
+            background = rounded(softBack, 18)
         }
         back.addView(textView("EDIT", 11f, ink, true),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        back.addView(textView("DELETE", 11f, 0xFF8A2929.toInt(), true).apply { gravity = Gravity.END },
+        back.addView(textView("DELETE", 11f, danger, true).apply { gravity = Gravity.END },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
         return SwipeRow(
@@ -655,8 +714,8 @@ class MainActivity : Activity() {
         fun refresh() {
             chips.forEach { (type, chip) ->
                 val active = type == selected
-                chip.setTextColor(if (active) 0xFFFFFFFF.toInt() else ink)
-                chip.background = rounded(if (active) ink else 0xFFFFFFFF.toInt(), 22,
+                chip.setTextColor(if (active) onInk else ink)
+                chip.background = rounded(if (active) ink else cardBg, 22,
                     if (active) ink else line)
             }
         }
@@ -972,7 +1031,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val clock = AnalogClockView(this, working) { updated ->
+        val clock = AnalogClockView(this, darkTheme, working) { updated ->
             working.set(java.util.Calendar.HOUR_OF_DAY, updated.get(java.util.Calendar.HOUR_OF_DAY))
             working.set(java.util.Calendar.MINUTE, updated.get(java.util.Calendar.MINUTE))
             digital.text = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(working.time)
@@ -1224,6 +1283,7 @@ private class CallTypeIcon(context: Context, private val type: Int, tint: Int) :
 
 private class AnalogClockView(
     context: android.content.Context,
+    private val dark: Boolean,
     private val selected: java.util.Calendar,
     private val onTimeChanged: (java.util.Calendar) -> Unit
 ) : View(context) {
@@ -1231,9 +1291,11 @@ private class AnalogClockView(
     var mode: Mode = Mode.HOUR
     private val density = resources.displayMetrics.density
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val face = 0xFFF2F2EF.toInt()
-    private val ink = 0xFF202020.toInt()
-    private val muted = 0xFF777777.toInt()
+    private val face = if (dark) 0xFF2A2A2A.toInt() else 0xFFF2F2EF.toInt()
+    private val ink = if (dark) 0xFFF2F2F2.toInt() else 0xFF202020.toInt()
+    private val muted = if (dark) 0xFFA0A0A0.toInt() else 0xFF777777.toInt()
+    private val ring = if (dark) 0xFF444444.toInt() else 0xFFD8D8D2.toInt()
+    private val tickMinor = if (dark) 0xFF666666.toInt() else 0xFFB8B8B0.toInt()
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -1243,7 +1305,7 @@ private class AnalogClockView(
         paint.color = face
         paint.style = Paint.Style.FILL
         canvas.drawCircle(cx, cy, radius + 12f * density, paint)
-        paint.color = 0xFFD8D8D2.toInt()
+        paint.color = ring
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = density
         canvas.drawCircle(cx, cy, radius + 12f * density, paint)
@@ -1253,7 +1315,7 @@ private class AnalogClockView(
             val major = i % 5 == 0
             val outer = radius - if (major) 3f * density else 0f
             val inner = outer - if (major) 12f * density else 5f * density
-            paint.color = if (major) ink else 0xFFB8B8B0.toInt()
+            paint.color = if (major) ink else tickMinor
             paint.strokeWidth = if (major) 2f * density else density
             canvas.drawLine(
                 cx + (inner * kotlin.math.cos(angle)).toFloat(),

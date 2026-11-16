@@ -90,3 +90,8 @@
 **Made with ❤️ by Chaman Bhai Production**
 
 </div>
+
+## Dark mode (v08)
+- Header button "◐" cycles System → Light → Dark (saved in `calllog_ui` prefs). Default = follow system.
+- All colours come from `applyPalette()` in MainActivity; dialogs/date picker use `AppLight` / `AppDark` (res/values/styles.xml).
+- Written without a compiler: first CI build is the first compile check.
