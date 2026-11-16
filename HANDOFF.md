@@ -468,3 +468,15 @@ Source was patched but no Kotlin compiler/Android SDK was available when written
 - Undo bar (5 s) after any delete; restores all deleted rows via insert (new `_ID`s).
 - Small monochrome call-type icons (custom `CallTypeIcon` view).
 - Files: `DisplayItem`, `SwipeRow`, `CallTypeIcon` added in `MainActivity.kt`; `READ_CONTACTS` added to the manifest.
+
+---
+
+## 19. v09 changes (NOT yet compiled/tested on device)
+
+Added per-number **Number stats** (counts only, no call list). New `STATS` button in the bottom bar (left of `+ NEW ENTRY`). Opens a dialog with a phone-number field (pre-filled from the search box); results update live as digits change.
+
+- Matching: last 10 digits of the number (ignores +91 / 0 / spaces). Needs at least 5 digits.
+- Shows "X times" for: Incoming (connected) + total incoming time, Outgoing connected (duration > 0) + total outgoing time, Outgoing not connected (duration = 0), Missed, Rejected, Blocked (only if > 0), Total calls + total call time (incoming + outgoing).
+- Code: `showNumberStats()`, `last10()`, `fmtDuration()` in `MainActivity.kt` (before `typeName`). Reads from the in-memory `entries` list (already loaded by `loadCalls()`); no new permission.
+- Missed/Rejected counts are real provider rows (each row = 1 time).
+- Test on device: pick a number with known history and compare each count with the call log; check dark and light theme.

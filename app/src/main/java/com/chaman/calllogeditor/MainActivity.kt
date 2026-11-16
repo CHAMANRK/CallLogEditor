@@ -295,6 +295,16 @@ class MainActivity : Activity() {
             setOnClickListener { requestPermissions() }
         }
         bottomBar.addView(permission, LinearLayout.LayoutParams(0, dp(48), 1f))
+        val statsBtn = TextView(this).apply {
+            text = "STATS"
+            textSize = 12f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(ink)
+            background = rounded(cardBg, 15, line)
+            setOnClickListener { showNumberStats() }
+        }
+        bottomBar.addView(statsBtn, LinearLayout.LayoutParams(dp(86), dp(48)).apply { marginEnd = dp(8) })
         val add = TextView(this).apply {
             text = "+  NEW ENTRY"
             textSize = 12f
@@ -686,6 +696,111 @@ class MainActivity : Activity() {
     @Suppress("OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
         if (selectMode) setSelectMode(false) else super.onBackPressed()
+    }
+
+    // ---- Per-number stats: only counts ("X times") and durations, no call list ----
+    private fun last10(n: String): String {
+        val d = n.filter { it.isDigit() }
+        return if (d.length > 10) d.substring(d.length - 10) else d
+    }
+
+    private fun fmtDuration(sec: Long): String {
+        if (sec <= 0L) return "0 sec"
+        val h = sec / 3600
+        val m = (sec % 3600) / 60
+        val r = sec % 60
+        val parts = ArrayList<String>()
+        if (h > 0) parts.add("$h hr")
+        if (m > 0) parts.add("$m min")
+        if (r > 0 && h == 0L) parts.add("$r sec")
+        return parts.joinToString(" ")
+    }
+
+    private fun showNumberStats() {
+        if (!has(Manifest.permission.READ_CALL_LOG)) {
+            Toast.makeText(this, "Call log permission required", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(16), dp(20), dp(8))
+        }
+        val input = EditText(this).apply {
+            hint = "Phone number"
+            textSize = 16f
+            setTextColor(ink)
+            setHintTextColor(muted)
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_PHONE
+            setText(searchBox?.text?.toString()?.filter { it.isDigit() || it == '+' } ?: "")
+            setSelection(text.length)
+        }
+        box.addView(input)
+        val result = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(12), 0, 0)
+        }
+        box.addView(result)
+
+        fun statRow(label: String, count: Int, extra: String? = null) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(9), 0, dp(9))
+            }
+            val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            top.addView(textView(label, 14f, ink, false),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            top.addView(textView("$count times", 15f, ink, true))
+            row.addView(top)
+            if (extra != null) row.addView(textView(extra, 12f, muted).apply { setPadding(0, dp(3), 0, 0) })
+            result.addView(row)
+            result.addView(View(this).apply { setBackgroundColor(line) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+        }
+
+        fun refresh() {
+            result.removeAllViews()
+            val key = last10(input.text.toString())
+            if (key.length < 5) {
+                result.addView(textView("Number daalo (kam se kam 5 digit)", 12f, muted))
+                return
+            }
+            val rows = entries.filter { last10(it.number) == key }
+            if (rows.isEmpty()) {
+                result.addView(textView("Is number ka koi record nahi mila", 13f, muted))
+                return
+            }
+            val inc = rows.filter { it.type == CallLog.Calls.INCOMING_TYPE }
+            val outAll = rows.filter { it.type == CallLog.Calls.OUTGOING_TYPE }
+            val outOk = outAll.filter { it.duration > 0 }
+            val outNo = outAll.filter { it.duration <= 0 }
+            val missed = rows.count { it.type == CallLog.Calls.MISSED_TYPE }
+            val rejected = rows.count { it.type == CallLog.Calls.REJECTED_TYPE }
+            val blocked = rows.count { it.type == CallLog.Calls.BLOCKED_TYPE }
+            val incSec = inc.sumOf { it.duration }
+            val outSec = outAll.sumOf { it.duration }
+
+            val nm = names[rows.first().number]
+            result.addView(textView(nm ?: rows.first().number, 16f, ink, true).apply { setPadding(0, 0, 0, dp(4)) })
+            statRow("Incoming (connected)", inc.size, "Total time: ${fmtDuration(incSec)}")
+            statRow("Outgoing connected", outOk.size, "Total time: ${fmtDuration(outSec)}")
+            statRow("Outgoing not connected", outNo.size)
+            statRow("Missed", missed)
+            statRow("Rejected", rejected)
+            if (blocked > 0) statRow("Blocked", blocked)
+            statRow("Total calls", rows.size, "Total call time: ${fmtDuration(incSec + outSec)}")
+        }
+        input.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { refresh() }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+        refresh()
+        AlertDialog.Builder(this)
+            .setTitle("Number stats")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("CLOSE", null)
+            .show()
     }
 
     private fun typeName(type: Int) = when (type) {
