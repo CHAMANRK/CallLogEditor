@@ -992,10 +992,10 @@ class MainActivity : Activity() {
         background = null
     }
 
-    private fun fieldBox(edit: EditText): LinearLayout = LinearLayout(this).apply {
+    private fun fieldBox(edit: EditText, pad: Int = 14): LinearLayout = LinearLayout(this).apply {
         gravity = Gravity.CENTER_VERTICAL
         background = rounded(cardBg, 15, line)
-        setPadding(dp(14), 0, dp(14), 0)
+        setPadding(dp(pad), 0, dp(pad), 0)
         addView(edit, LinearLayout.LayoutParams(MP, dp(52)))
     }
 
@@ -1147,11 +1147,25 @@ class MainActivity : Activity() {
         })
 
         // Duration / count fields start EMPTY. In Edit a blank field keeps the current value.
-        val durationLabel = formLabel("DURATION (SECONDS)")
-        val durationInput = styledEdit("Seconds", android.text.InputType.TYPE_CLASS_NUMBER).apply {
-            if (!editing && src != null && !isNoAnswerType(src.type)) setText(src.duration.toString())
+        val durationLabel = formLabel("DURATION")
+        fun durField(h: String) = styledEdit(h, android.text.InputType.TYPE_CLASS_NUMBER).apply {
+            gravity = Gravity.CENTER
         }
-        val durationBox = fieldBox(durationInput)
+        val hoursInput = durField("Hours")
+        val minutesInput = durField("Minutes")
+        val secondsInput = durField("Seconds")
+        if (!editing && src != null && !isNoAnswerType(src.type)) {
+            val d = src.duration
+            if (d / 3600 > 0) hoursInput.setText((d / 3600).toString())
+            if ((d % 3600) / 60 > 0) minutesInput.setText(((d % 3600) / 60).toString())
+            if (d % 60 > 0 || d == 0L) secondsInput.setText((d % 60).toString())
+        }
+        val durationBox = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf(hoursInput, minutesInput, secondsInput).forEachIndexed { i, f ->
+            durationBox.addView(fieldBox(f, 6), LinearLayout.LayoutParams(0, WC, 1f).apply {
+                if (i > 0) marginStart = dp(8)
+            })
+        }
         val countLabel = formLabel("")
         val countInput = styledEdit("How many times", android.text.InputType.TYPE_CLASS_NUMBER).apply {
             if (!editing && prefill != null && prefill.grouped) setText(prefill.count.toString())
@@ -1166,8 +1180,8 @@ class MainActivity : Activity() {
             countLabel.visibility = showCnt
             countBox.visibility = showCnt
             countLabel.text = "X TIMES GET ${typeName(selectedType).uppercase(Locale.getDefault())}"
-            durationInput.hint = "Seconds" +
-                if (editing && !originalNoAnswer && src != null) "   (now ${src.duration})" else ""
+            durationLabel.text = "DURATION" +
+                if (editing && !originalNoAnswer && src != null) "   ·   now ${fmtDuration(src.duration)}" else ""
             countInput.hint = "How many times" +
                 if (editing && originalNoAnswer && editItem != null) "   (now ${editItem.count})" else ""
         }
@@ -1233,6 +1247,15 @@ class MainActivity : Activity() {
             panel.addView(extra)
         }
 
+        fun durationBlank() = hoursInput.text.isBlank() && minutesInput.text.isBlank() && secondsInput.text.isBlank()
+        fun readDuration(): Long? {
+            val h = hoursInput.text.toString().trim().ifEmpty { "0" }.toLongOrNull()
+            val m = minutesInput.text.toString().trim().ifEmpty { "0" }.toLongOrNull()
+            val sec = secondsInput.text.toString().trim().ifEmpty { "0" }.toLongOrNull()
+            if (h == null || m == null || sec == null) return null
+            return h * 3600 + m * 60 + sec
+        }
+
         fun save() {
             val number = numberInput.text.toString().trim()
             if (number.isBlank() || (number.none { it.isDigit() } && !(editing && number == src?.number))) {
@@ -1251,11 +1274,11 @@ class MainActivity : Activity() {
                     formFail("Times: 1 se 500 ke beech daalo")
                     return
                 }
-                val durationText = durationInput.text.toString().trim()
-                val duration = if (durationText.isEmpty()) (if (originalNoAnswer) 0L else entry.duration)
-                else durationText.toLongOrNull()
-                if (!noAnswer && (duration == null || duration < 0)) {
-                    formFail("Duration 0 ya usse zyada daalo")
+                // All three blank = keep what the record already has.
+                val duration = if (durationBlank()) (if (originalNoAnswer) 0L else entry.duration)
+                else readDuration()
+                if (!noAnswer && duration == null) {
+                    formFail("Hours / Minutes / Seconds me sahi number daalo")
                     return
                 }
                 try {
@@ -1285,14 +1308,14 @@ class MainActivity : Activity() {
                     Toast.makeText(this, "Update failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             } else {
-                val duration = durationInput.text.toString().trim().toLongOrNull()
+                val duration = if (durationBlank()) null else readDuration()
                 val times = countInput.text.toString().trim().toIntOrNull()
                 if (noAnswer && (times == null || times !in 1..500)) {
                     formFail("Times: 1 se 500 ke beech daalo")
                     return
                 }
-                if (!noAnswer && (duration == null || duration < 0)) {
-                    formFail("Duration 0 ya usse zyada daalo")
+                if (!noAnswer && duration == null) {
+                    formFail("Duration daalo (Hours / Minutes / Seconds, 0 bhi chalega)")
                     return
                 }
                 try {
@@ -1342,6 +1365,40 @@ class MainActivity : Activity() {
             25f, ink, true
         )
         panel.addView(digital)
+        val ampmRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(10), 0, dp(6))
+        }
+        val amChip = TextView(this)
+        val pmChip = TextView(this)
+        fun refreshAmPm() {
+            val pm = working.get(java.util.Calendar.AM_PM) == java.util.Calendar.PM
+            listOf(amChip to !pm, pmChip to pm).forEach { (chip, active) ->
+                chip.setTextColor(if (active) onInk else ink)
+                chip.background = rounded(if (active) ink else cardBg, 22, if (active) ink else line)
+            }
+        }
+        fun setPeriod(pm: Boolean) {
+            val h = working.get(java.util.Calendar.HOUR_OF_DAY) % 12 + if (pm) 12 else 0
+            working.set(java.util.Calendar.HOUR_OF_DAY, h)
+            digital.text = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(working.time)
+            refreshAmPm()
+        }
+        listOf(amChip to "AM", pmChip to "PM").forEach { (chip, label) ->
+            chip.apply {
+                text = label
+                textSize = 13f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setOnClickListener { setPeriod(label == "PM") }
+            }
+            ampmRow.addView(chip, LinearLayout.LayoutParams(dp(76), dp(38)).apply {
+                marginStart = dp(5); marginEnd = dp(5)
+            })
+        }
+        refreshAmPm()
+        panel.addView(ampmRow)
         val modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -1350,6 +1407,7 @@ class MainActivity : Activity() {
             working.set(java.util.Calendar.HOUR_OF_DAY, updated.get(java.util.Calendar.HOUR_OF_DAY))
             working.set(java.util.Calendar.MINUTE, updated.get(java.util.Calendar.MINUTE))
             digital.text = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(working.time)
+            refreshAmPm()
         }
         val hourMode = Button(this).apply { text = "HOUR" }
         val minuteMode = Button(this).apply { text = "MINUTE" }
@@ -1361,7 +1419,7 @@ class MainActivity : Activity() {
         panel.addView(clock, LinearLayout.LayoutParams(dp(280), dp(280)))
         AlertDialog.Builder(this)
             .setTitle("Set time")
-            .setView(panel)
+            .setView(ScrollView(this).apply { addView(panel) })
             .setPositiveButton("Save") { _, _ ->
                 calendar.set(java.util.Calendar.HOUR_OF_DAY, working.get(java.util.Calendar.HOUR_OF_DAY))
                 calendar.set(java.util.Calendar.MINUTE, working.get(java.util.Calendar.MINUTE))

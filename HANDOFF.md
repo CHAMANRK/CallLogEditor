@@ -496,3 +496,12 @@ Replaces the v09 STATS dialog. Written without Android SDK; first GitHub Actions
 - Still AlertDialogs (kept on purpose): permission-needed message, multi-delete confirm, Android DatePickerDialog, analog time picker.
 - Window insets handled on `rootLayout` (status bar / nav bar / keyboard) and `SOFT_INPUT_ADJUST_RESIZE`, because targetSdk 35 draws edge to edge.
 - Device test checklist: swipe between tabs (and tab tap); list tap opens form; long press select + delete; New entry with name suggestion; Edit missed group count; Copy as new; two-tap delete + Undo; stats counts vs real call log; dark + light theme; keyboard does not hide the SAVE button.
+
+---
+
+## 21. v11 changes (NOT yet compiled/tested on device)
+
+Two small fixes on top of v10:
+- **Time picker now has AM / PM chips** (under the digital time). Tapping flips the period of the working time (`setPeriod`); the clock still keeps the selected period when hour is tapped. Dialog content is wrapped in a ScrollView for small screens.
+- **Duration is three blocks: Hours | Minutes | Seconds** (replaces "Duration in seconds"). Total = h*3600 + m*60 + s (`readDuration`). Edit: all three blank = keep current duration (label shows "now 1 hr 2 min"); Copy pre-fills the blocks; New: all blank = error, 0 is fine. Missed/Rejected/Blocked still use the "X times" field.
+- Test: set a time, tap AM then PM and Save; enter 0h 2m 30s and check the card shows 2 min 30 sec (150 s); Edit with blank blocks keeps old duration.
