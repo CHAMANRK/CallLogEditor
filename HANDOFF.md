@@ -480,3 +480,19 @@ Added per-number **Number stats** (counts only, no call list). New `STATS` butto
 - Code: `showNumberStats()`, `last10()`, `fmtDuration()` in `MainActivity.kt` (before `typeName`). Reads from the in-memory `entries` list (already loaded by `loadCalls()`); no new permission.
 - Missed/Rejected counts are real provider rows (each row = 1 time).
 - Test on device: pick a number with known history and compare each count with the call log; check dark and light theme.
+
+---
+
+## 20. v10 changes — UI redesign (NOT yet compiled/tested on device)
+
+Replaces the v09 STATS dialog. Written without Android SDK; first GitHub Actions run is the compile check. If it fails, fix only the reported line.
+
+- **Two swipeable tabs** (custom `SwipePager`, also tap on tab labels): **Editor** (filters All/Incoming/Outgoing/Missed, call list, `+ NEW ENTRY`, select bar) and **Search** (name or number → stats tiles).
+- **Search tab:** typing letters (or <5 digits) lists matching contacts (`searchContacts`, needs READ_CONTACTS; also uses names already resolved from the call log); tap one → stats. 5+ digits → stats by last 10 digits. Tiles (counts shown as "N times"): dark TOTAL CALLS tile with total call time, then Incoming (+ total time), Outgoing connected (+ total time), Outgoing not connected, Missed, Rejected, Blocked (only if > 0). All-time over whatever the phone's call log still holds.
+- **Edit / New / Copy are now a full-screen form** (`showEntryForm`, `openForm`, `closeForm`) instead of AlertDialog. Slides in from the right, back arrow, labelled sections, big SAVE button, inline red error line (`formFail`) instead of EditText.error. Same save/update/insert logic as v08 (reconcileCount, blank = keep current in Edit, 1–500 times, etc.).
+- **Name search in the form:** the number field is "Name or number"; typing shows contact suggestions (`contactRow`), tap fills the number. A number needs at least one digit.
+- Edit form has `COPY AS NEW` and `DELETE` (two-tap confirm: first tap arms, second within 3 s deletes; Undo bar still appears).
+- **Removed:** card swipe-right/left gestures (`SwipeRow` deleted) because they conflict with page swipe; the dark "YOUR CALL RECORDS" panel; the search box on the Editor tab; PERMISSIONS and STATS buttons. Card tap = edit, long press = multi-select (unchanged). The small status line under the title is tappable and requests permissions.
+- Still AlertDialogs (kept on purpose): permission-needed message, multi-delete confirm, Android DatePickerDialog, analog time picker.
+- Window insets handled on `rootLayout` (status bar / nav bar / keyboard) and `SOFT_INPUT_ADJUST_RESIZE`, because targetSdk 35 draws edge to edge.
+- Device test checklist: swipe between tabs (and tab tap); list tap opens form; long press select + delete; New entry with name suggestion; Edit missed group count; Copy as new; two-tap delete + Undo; stats counts vs real call log; dark + light theme; keyboard does not hide the SAVE button.

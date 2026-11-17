@@ -7,6 +7,7 @@ import android.app.DatePickerDialog
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.database.Cursor
+import android.os.Build
 import android.os.Bundle
 import android.provider.CallLog
 import android.view.Gravity
@@ -69,7 +70,18 @@ class MainActivity : Activity() {
     private val lookedUp = HashSet<String>()
     private val requestCode = 410
     private val contactsCode = 411
-    private var searchBox: EditText? = null
+    private lateinit var pager: SwipePager
+    private lateinit var rootLayout: FrameLayout
+    private lateinit var formHost: FrameLayout
+    private lateinit var formError: TextView
+    private lateinit var statsBody: LinearLayout
+    private var statsInput: EditText? = null
+    private var formOpen = false
+    private var formToken = 0
+    private val tabLabels = ArrayList<TextView>()
+    private val tabLines = ArrayList<View>()
+    private val MP = ViewGroup.LayoutParams.MATCH_PARENT
+    private val WC = ViewGroup.LayoutParams.WRAP_CONTENT
     private var activeFilter: String = "All"
     private val filterChips = linkedMapOf<String, TextView>()
     // Palette: filled by applyPalette() (light / dark) before the UI is built.
@@ -93,6 +105,7 @@ class MainActivity : Activity() {
         // dialogs, date picker and text fields follow the activity theme
         setTheme(if (darkTheme) R.style.AppDark else R.style.AppLight)
         super.onCreate(savedInstanceState)
+        window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         buildUi()
         checkPermissionsAndLoad()
     }
@@ -152,10 +165,31 @@ class MainActivity : Activity() {
         includeFontPadding = false
     }
 
+    private fun hideKeyboard() {
+        val v = currentFocus ?: return
+        (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+            .hideSoftInputFromWindow(v.windowToken, 0)
+    }
+
+    private fun squareButton(symbol: String, desc: String, onClick: () -> Unit) = TextView(this).apply {
+        text = symbol
+        textSize = 24f
+        gravity = Gravity.CENTER
+        setTextColor(ink)
+        contentDescription = desc
+        background = rounded(cardBg, 16, line)
+        setOnClickListener { onClick() }
+    }
+
+    private fun selectTab(i: Int) {
+        tabLabels.forEachIndexed { idx, t -> t.setTextColor(if (idx == i) ink else muted) }
+        tabLines.forEachIndexed { idx, v -> v.setBackgroundColor(if (idx == i) ink else line) }
+    }
+
     private fun buildUi() {
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(22), dp(20), dp(12))
+            setPadding(dp(20), dp(14), dp(20), dp(8))
             setBackgroundColor(paper)
         }
 
@@ -165,76 +199,97 @@ class MainActivity : Activity() {
         }
         val brand = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         brand.addView(textView("CHAMAN", 11f, muted, true))
-        brand.addView(textView("Call history", 29f, ink, true).apply {
-            setPadding(0, dp(3), 0, 0)
-        })
-        top.addView(brand, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-        val themeBtn = TextView(this).apply {
-            text = "◐"
-            textSize = 24f
-            gravity = Gravity.CENTER
-            setTextColor(ink)
-            contentDescription = "Theme: system, light or dark"
-            background = rounded(cardBg, 16, line)
-            setOnClickListener { cycleTheme() }
-        }
-        top.addView(themeBtn, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginEnd = dp(8) })
-        val refresh = TextView(this).apply {
-            text = "↻"
-            textSize = 26f
-            gravity = Gravity.CENTER
-            setTextColor(ink)
-            background = rounded(cardBg, 16, line)
-            setOnClickListener { loadCalls() }
-        }
-        top.addView(refresh, LinearLayout.LayoutParams(dp(48), dp(48)))
+        brand.addView(textView("Call history", 29f, ink, true).apply { setPadding(0, dp(3), 0, 0) })
+        top.addView(brand, LinearLayout.LayoutParams(0, WC, 1f))
+        top.addView(squareButton("◐", "Theme: system, light or dark") { cycleTheme() },
+            LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginEnd = dp(8) })
+        top.addView(squareButton("↻", "Refresh") { loadCalls() }, LinearLayout.LayoutParams(dp(48), dp(48)))
         page.addView(top)
 
-        val summary = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(16), dp(18), dp(16))
-            background = rounded(panelBg, 20)
+        // One quiet line instead of the old dark panel. Tap = permissions.
+        status = textView("Checking permissions…", 12f, muted).apply {
+            setPadding(0, dp(12), 0, 0)
+            setOnClickListener { requestPermissions() }
         }
-        summary.addView(textView("YOUR CALL RECORDS", 10f, 0xFFBDBDBD.toInt(), true))
-        status = textView("Checking permissions…", 17f, 0xFFFFFFFF.toInt(), true).apply {
-            setPadding(0, dp(7), 0, 0)
-        }
-        summary.addView(status)
-        val summaryParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(20); bottomMargin = dp(16) }
-        page.addView(summary, summaryParams)
+        page.addView(status)
 
-        val searchWrap = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
+        tabLabels.clear()
+        tabLines.clear()
+        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf("Editor", "Search").forEachIndexed { i, name ->
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setOnClickListener { pager.goTo(i) }
+            }
+            val label = textView(name, 14f, muted, true).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, dp(11), 0, dp(11))
+            }
+            val bar = View(this)
+            cell.addView(label, LinearLayout.LayoutParams(MP, WC))
+            cell.addView(bar, LinearLayout.LayoutParams(MP, dp(2)))
+            tabLabels.add(label)
+            tabLines.add(bar)
+            tabs.addView(cell, LinearLayout.LayoutParams(0, WC, 1f))
+        }
+        page.addView(tabs, LinearLayout.LayoutParams(MP, WC).apply { topMargin = dp(10) })
+
+        pager = SwipePager(this) { idx -> selectTab(idx); hideKeyboard() }
+        pager.addView(buildEditorPage(), FrameLayout.LayoutParams(MP, MP))
+        pager.addView(buildSearchPage(), FrameLayout.LayoutParams(MP, MP))
+        page.addView(pager, LinearLayout.LayoutParams(MP, 0, 1f).apply { topMargin = dp(14) })
+        selectTab(0)
+
+        undoText = textView("", 13f, 0xFFFFFFFF.toInt(), true)
+        undoBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(14), 0, dp(12), 0)
-            background = rounded(cardBg, 15, line)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(8), dp(8), dp(8))
+            background = rounded(panelBg, 15)
+            elevation = dp(6).toFloat()
+            visibility = View.GONE
         }
-        searchWrap.addView(textView("⌕", 25f, muted, true))
-        searchBox = EditText(this).apply {
-            hint = "Search number"
-            textSize = 14f
-            setTextColor(ink)
-            setHintTextColor(muted)
-            setSingleLine(true)
-            background = null
-            setPadding(dp(10), dp(13), dp(4), dp(13))
-            addTextChangedListener(object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { renderEntries() }
-                override fun afterTextChanged(s: android.text.Editable?) {}
-            })
+        undoBar.addView(undoText, LinearLayout.LayoutParams(0, WC, 1f))
+        undoBar.addView(actionButton("UNDO", 0xFFFFFFFF.toInt(), panelBtn) { restoreDeleted() },
+            LinearLayout.LayoutParams(dp(68), dp(34)))
+
+        formHost = FrameLayout(this).apply {
+            visibility = View.GONE
+            setBackgroundColor(paper)
+            isClickable = true
         }
-        searchWrap.addView(searchBox, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val searchParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50))
-        page.addView(searchWrap, searchParams)
+        rootLayout = FrameLayout(this)
+        rootLayout.addView(page, FrameLayout.LayoutParams(MP, MP))
+        rootLayout.addView(formHost, FrameLayout.LayoutParams(MP, MP))
+        rootLayout.addView(undoBar, FrameLayout.LayoutParams(MP, WC, Gravity.BOTTOM)
+            .apply { setMargins(dp(20), 0, dp(20), dp(76)) })
+        // Keep content clear of status bar / nav bar / keyboard (Android 15 draws edge to edge).
+        rootLayout.setOnApplyWindowInsetsListener { v, insets ->
+            val topInset: Int
+            val bottomInset: Int
+            if (Build.VERSION.SDK_INT >= 30) {
+                topInset = insets.getInsets(android.view.WindowInsets.Type.systemBars()).top
+                bottomInset = insets.getInsets(
+                    android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.ime()
+                ).bottom
+            } else {
+                topInset = insets.systemWindowInsetTop
+                bottomInset = insets.systemWindowInsetBottom
+            }
+            v.setPadding(0, topInset, 0, bottomInset)
+            insets
+        }
+        setContentView(rootLayout)
+    }
+
+    // ---------------- Editor tab: filters + list + new entry ----------------
+    private fun buildEditorPage(): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         val filters = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(14), 0, dp(14))
+            setPadding(0, 0, 0, dp(12))
         }
         filterChips.clear()
         listOf("All", "Incoming", "Outgoing", "Missed").forEach { filter ->
@@ -256,55 +311,23 @@ class MainActivity : Activity() {
                 }
             }
             filterChips[filter] = chip
-            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36))
-            lp.marginEnd = dp(7)
-            filters.addView(chip, lp)
+            filters.addView(chip, LinearLayout.LayoutParams(WC, dp(36)).apply { marginEnd = dp(7) })
         }
-        page.addView(filters)
-
-        val section = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        section.addView(textView("Recent activity", 18f, ink, true),
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        section.addView(textView("EDIT YOUR HISTORY", 9f, muted, true))
-        page.addView(section)
+        col.addView(filters)
 
         scrollView = ScrollView(this).apply { clipToPadding = false }
         list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(12), 0, dp(20))
+            setPadding(0, dp(4), 0, dp(16))
         }
         scrollView.addView(list)
-        page.addView(scrollView, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
-        ))
+        col.addView(scrollView, LinearLayout.LayoutParams(MP, 0, 1f))
 
         bottomBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(10), 0, dp(4))
         }
-        val permission = TextView(this).apply {
-            text = "PERMISSIONS"
-            textSize = 10f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setTextColor(muted)
-            setPadding(dp(8), dp(12), dp(8), dp(12))
-            setOnClickListener { requestPermissions() }
-        }
-        bottomBar.addView(permission, LinearLayout.LayoutParams(0, dp(48), 1f))
-        val statsBtn = TextView(this).apply {
-            text = "STATS"
-            textSize = 12f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            gravity = Gravity.CENTER
-            setTextColor(ink)
-            background = rounded(cardBg, 15, line)
-            setOnClickListener { showNumberStats() }
-        }
-        bottomBar.addView(statsBtn, LinearLayout.LayoutParams(dp(86), dp(48)).apply { marginEnd = dp(8) })
         val add = TextView(this).apply {
             text = "+  NEW ENTRY"
             textSize = 12f
@@ -314,7 +337,8 @@ class MainActivity : Activity() {
             background = rounded(ink, 15)
             setOnClickListener { addNewEntry() }
         }
-        bottomBar.addView(add, LinearLayout.LayoutParams(dp(158), dp(48)))
+        bottomBar.addView(add, LinearLayout.LayoutParams(MP, dp(52)))
+
         selectBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -323,36 +347,14 @@ class MainActivity : Activity() {
             visibility = View.GONE
         }
         selectCount = textView("0 selected", 13f, 0xFFFFFFFF.toInt(), true)
-        selectBar.addView(selectCount, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        selectBar.addView(selectCount, LinearLayout.LayoutParams(0, WC, 1f))
         selectBar.addView(actionButton("CANCEL", 0xFFFFFFFF.toInt(), panelBtn) { setSelectMode(false) },
             LinearLayout.LayoutParams(dp(72), dp(34)))
         selectBar.addView(actionButton("DELETE", 0xFFFFFFFF.toInt(), 0xFF8A2929.toInt()) { confirmDeleteSelected() },
             LinearLayout.LayoutParams(dp(72), dp(34)).apply { marginStart = dp(7) })
-        page.addView(selectBar, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(48)
-        ).apply { topMargin = dp(10); bottomMargin = dp(4) })
-        page.addView(bottomBar)
-
-        undoText = textView("", 13f, 0xFFFFFFFF.toInt(), true)
-        undoBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(8), dp(8), dp(8))
-            background = rounded(panelBg, 15)
-            elevation = dp(6).toFloat()
-            visibility = View.GONE
-        }
-        undoBar.addView(undoText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        undoBar.addView(actionButton("UNDO", 0xFFFFFFFF.toInt(), panelBtn) { restoreDeleted() },
-            LinearLayout.LayoutParams(dp(68), dp(34)))
-        val root = FrameLayout(this)
-        root.addView(page, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-        ))
-        root.addView(undoBar, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM
-        ).apply { setMargins(dp(20), 0, dp(20), dp(76)) })
-        setContentView(root)
+        col.addView(selectBar, LinearLayout.LayoutParams(MP, dp(52)).apply { topMargin = dp(10); bottomMargin = dp(4) })
+        col.addView(bottomBar)
+        return col
     }
 
     private fun updateFilterChips() {
@@ -513,7 +515,7 @@ class MainActivity : Activity() {
         if (!::list.isInitialized) return
         val keepScroll = scrollView.scrollY
         list.removeAllViews()
-        val query = searchBox?.text?.toString()?.trim()?.lowercase(Locale.getDefault()).orEmpty()
+        val query = ""
         val filtered = entries.filter { entry ->
             val name = names[entry.number]?.lowercase(Locale.getDefault()).orEmpty()
             val matchesQuery = query.isEmpty() ||
@@ -539,7 +541,7 @@ class MainActivity : Activity() {
                 background = rounded(cardBg, 18, line)
             }
             empty.addView(textView("No calls found", 17f, ink, true))
-            empty.addView(textView("Try another search or filter.", 12f, muted).apply {
+            empty.addView(textView("Try another filter.", 12f, muted).apply {
                 setPadding(0, dp(7), 0, 0)
             })
             list.addView(empty)
@@ -575,16 +577,20 @@ class MainActivity : Activity() {
         val selected = selectMode && item.key in selectedKeys
         val name = names[entry.number]
         val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(15), dp(14), dp(15), dp(12))
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(13), dp(16), dp(13))
             background = rounded(
                 if (selected) cardSel else cardBg, 18,
                 if (selected) ink else line
             )
-        }
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            // Tap = open the edit screen (or toggle when selecting). Long press = select.
+            setOnClickListener { if (selectMode) toggleSelect(item) else editEntry(item) }
+            setOnLongClickListener {
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                if (selectMode) toggleSelect(item) else startSelect(item)
+                true
+            }
         }
         val avatar = TextView(this).apply {
             text = if (selected) "✓" else ((name ?: entry.number).firstOrNull()?.toString() ?: "?")
@@ -594,11 +600,11 @@ class MainActivity : Activity() {
             setTextColor(if (selected) onInk else ink)
             background = rounded(if (selected) ink else soft, 15)
         }
-        row.addView(avatar, LinearLayout.LayoutParams(dp(44), dp(44)))
+        card.addView(avatar, LinearLayout.LayoutParams(dp(44), dp(44)))
 
         val info = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), 0, 0, 0)
+            setPadding(dp(12), 0, dp(8), 0)
         }
         info.addView(textView(name ?: entry.number, 16f, ink, true))
         if (name != null) {
@@ -615,56 +621,11 @@ class MainActivity : Activity() {
             setPadding(dp(5), 0, 0, 0)
         })
         info.addView(typeLine)
-        row.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        card.addView(row)
+        card.addView(info, LinearLayout.LayoutParams(0, WC, 1f))
 
-        val divider = View(this).apply { setBackgroundColor(line) }
-        card.addView(divider, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
-        ).apply { topMargin = dp(12); bottomMargin = dp(8) })
-
-        val actions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val meta = if (item.grouped) "${typeName(entry.type).uppercase()}  ×  ${item.count}"
-        else "${entry.duration}s duration"
-        actions.addView(textView(meta, 11f, muted, item.grouped),
-            LinearLayout.LayoutParams(0, dp(36), 1f))
-        if (!selectMode) {
-            actions.addView(
-                actionButton("COPY", ink, soft) { addNewEntry(item) },
-                LinearLayout.LayoutParams(dp(52), dp(34))
-            )
-            actions.addView(
-                actionButton("EDIT", ink, soft) { editEntry(item) },
-                LinearLayout.LayoutParams(dp(52), dp(34)).apply { marginStart = dp(6) }
-            )
-            actions.addView(
-                actionButton("DELETE", danger, dangerBg) { confirmDelete(item) },
-                LinearLayout.LayoutParams(dp(64), dp(34)).apply { marginStart = dp(6) }
-            )
-        }
-        card.addView(actions)
-
-        val back = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(22), 0, dp(22), 0)
-            background = rounded(softBack, 18)
-        }
-        back.addView(textView("EDIT", 11f, ink, true),
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        back.addView(textView("DELETE", 11f, danger, true).apply { gravity = Gravity.END },
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-        return SwipeRow(
-            this, card, back,
-            onSwipeRight = { editEntry(item) },
-            onSwipeLeft = { confirmDelete(item) },
-            onLongPress = { startSelect(item) },
-            onTap = { if (selectMode) toggleSelect(item) }
-        ).apply { swipeEnabled = !selectMode }
+        val meta = if (item.grouped) "×  ${item.count}" else fmtDuration(entry.duration)
+        card.addView(textView(meta, if (item.grouped) 17f else 12f, if (item.grouped) ink else muted, item.grouped))
+        return card
     }
 
     private fun startSelect(item: DisplayItem) {
@@ -695,10 +656,15 @@ class MainActivity : Activity() {
 
     @Suppress("OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
-        if (selectMode) setSelectMode(false) else super.onBackPressed()
+        when {
+            formOpen -> closeForm()
+            selectMode -> setSelectMode(false)
+            pager.page == 1 -> pager.goTo(0)
+            else -> super.onBackPressed()
+        }
     }
 
-    // ---- Per-number stats: only counts ("X times") and durations, no call list ----
+    // ---------------- Search tab: per-number stats (counts only, no call list) ----------------
     private fun last10(n: String): String {
         val d = n.filter { it.isDigit() }
         return if (d.length > 10) d.substring(d.length - 10) else d
@@ -716,91 +682,211 @@ class MainActivity : Activity() {
         return parts.joinToString(" ")
     }
 
-    private fun showNumberStats() {
-        if (!has(Manifest.permission.READ_CALL_LOG)) {
-            Toast.makeText(this, "Call log permission required", Toast.LENGTH_SHORT).show()
-            return
+    // Contacts by name or number (needs READ_CONTACTS), plus names already seen in the call log.
+    private fun searchContacts(q: String): List<Pair<String, String>> {
+        val out = LinkedHashMap<String, Pair<String, String>>()
+        if (has(Manifest.permission.READ_CONTACTS)) {
+            try {
+                val uri = Uri.withAppendedPath(
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_FILTER_URI, Uri.encode(q)
+                )
+                contentResolver.query(
+                    uri,
+                    arrayOf(
+                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER
+                    ),
+                    null, null, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+                )?.use { c ->
+                    while (c.moveToNext() && out.size < 6) {
+                        val num = c.getString(1) ?: continue
+                        val nm = c.getString(0) ?: num
+                        val k = last10(num)
+                        if (k !in out) out[k] = Pair(nm, num)
+                    }
+                }
+            } catch (e: Exception) {
+            }
         }
-        val box = LinearLayout(this).apply {
+        val ql = q.lowercase(Locale.getDefault())
+        names.forEach { (num, nm) ->
+            val k = last10(num)
+            if (out.size < 6 && k !in out && nm.lowercase(Locale.getDefault()).contains(ql)) out[k] = Pair(nm, num)
+        }
+        return out.values.toList()
+    }
+
+    private fun contactRow(name: String, number: String, onClick: () -> Unit): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(cardBg, 14, line)
+            setOnClickListener { onClick() }
+        }
+        row.addView(TextView(this).apply {
+            text = name.firstOrNull()?.toString() ?: "?"
+            textSize = 15f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(ink)
+            background = rounded(soft, 12)
+        }, LinearLayout.LayoutParams(dp(36), dp(36)))
+        val info = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(16), dp(20), dp(8))
+            setPadding(dp(12), 0, 0, 0)
         }
+        info.addView(textView(name, 14f, ink, true))
+        if (name != number) info.addView(textView(number, 12f, muted).apply { setPadding(0, dp(2), 0, 0) })
+        row.addView(info, LinearLayout.LayoutParams(0, WC, 1f))
+        return row
+    }
+
+    private fun buildSearchPage(): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        statsBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(16), 0, dp(24))
+        }
+        val wrap = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(14), 0, dp(12), 0)
+            background = rounded(cardBg, 15, line)
+        }
+        wrap.addView(textView("⌕", 25f, muted, true))
         val input = EditText(this).apply {
-            hint = "Phone number"
-            textSize = 16f
+            hint = "Name or number"
+            textSize = 15f
             setTextColor(ink)
             setHintTextColor(muted)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
             setSingleLine(true)
-            inputType = android.text.InputType.TYPE_CLASS_PHONE
-            setText(searchBox?.text?.toString()?.filter { it.isDigit() || it == '+' } ?: "")
-            setSelection(text.length)
+            background = null
+            setPadding(dp(10), dp(14), dp(4), dp(14))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { refreshStats() }
+                override fun afterTextChanged(s: android.text.Editable?) {}
+            })
         }
-        box.addView(input)
-        val result = LinearLayout(this).apply {
+        statsInput = input
+        wrap.addView(input, LinearLayout.LayoutParams(0, WC, 1f))
+        col.addView(wrap, LinearLayout.LayoutParams(MP, dp(52)))
+        val sv = ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+        sv.addView(statsBody)
+        col.addView(sv, LinearLayout.LayoutParams(MP, 0, 1f))
+        refreshStats()
+        return col
+    }
+
+    private fun countText(count: Int, color: Int, subColor: Int): TextView {
+        val big = count.toString()
+        val sp = android.text.SpannableString("$big times")
+        sp.setSpan(android.text.style.RelativeSizeSpan(0.42f), big.length, sp.length, 0)
+        sp.setSpan(android.text.style.ForegroundColorSpan(subColor), big.length, sp.length, 0)
+        return TextView(this).apply {
+            text = sp
+            textSize = 30f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(color)
+            includeFontPadding = false
+        }
+    }
+
+    private fun statTile(count: Int, label: String, sub: String?): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(16), dp(15), dp(16), dp(15))
+        background = rounded(cardBg, 18, line)
+        addView(countText(count, ink, muted))
+        addView(textView(label, 13f, ink, true).apply { setPadding(0, dp(8), 0, 0) })
+        if (sub != null) addView(textView(sub, 11f, muted).apply { setPadding(0, dp(3), 0, 0) })
+    }
+
+    private fun tileRow(a: View, b: View?): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        addView(a, LinearLayout.LayoutParams(0, MP, 1f))
+        addView(b ?: View(context), LinearLayout.LayoutParams(0, MP, 1f).apply { marginStart = dp(10) })
+    }
+
+    private fun refreshStats() {
+        if (!::statsBody.isInitialized) return
+        val body = statsBody
+        body.removeAllViews()
+        val q = statsInput?.text?.toString()?.trim().orEmpty()
+        if (q.isEmpty()) {
+            body.addView(textView("Kisi bhi naam ya number se search karo.\nYaha uske calls ka summary milega.", 13f, muted))
+            return
+        }
+        val digits = q.filter { it.isDigit() }
+        if (q.any { it.isLetter() } || digits.length < 5) {
+            val found = searchContacts(q)
+            if (found.isEmpty()) {
+                val msg = if (q.any { it.isLetter() } && !has(Manifest.permission.READ_CONTACTS))
+                    "Naam se search ke liye Contacts permission do (tap)" else
+                    if (q.any { it.isLetter() }) "Is naam ka koi contact nahi mila" else "Kam se kam 5 digit daalo"
+                body.addView(textView(msg, 13f, muted).apply {
+                    if (!has(Manifest.permission.READ_CONTACTS)) setOnClickListener {
+                        requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), contactsCode)
+                    }
+                })
+                return
+            }
+            found.forEach { (nm, num) ->
+                body.addView(contactRow(nm, num) { statsInput?.setText(num); hideKeyboard() },
+                    LinearLayout.LayoutParams(MP, WC).apply { bottomMargin = dp(8) })
+            }
+            return
+        }
+        renderStats(q)
+    }
+
+    private fun renderStats(number: String) {
+        val body = statsBody
+        val key = last10(number)
+        val rows = entries.filter { last10(it.number) == key }
+        if (rows.isEmpty()) {
+            body.addView(textView("Is number ka koi record nahi mila", 13f, muted))
+            return
+        }
+        val inc = rows.filter { it.type == CallLog.Calls.INCOMING_TYPE }
+        val outAll = rows.filter { it.type == CallLog.Calls.OUTGOING_TYPE }
+        val outOk = outAll.filter { it.duration > 0 }
+        val outNo = outAll.filter { it.duration <= 0 }
+        val missed = rows.count { it.type == CallLog.Calls.MISSED_TYPE }
+        val rejected = rows.count { it.type == CallLog.Calls.REJECTED_TYPE }
+        val blocked = rows.count { it.type == CallLog.Calls.BLOCKED_TYPE }
+        val incSec = inc.sumOf { it.duration }
+        val outSec = outAll.sumOf { it.duration }
+
+        val nm = names[rows.first().number]
+        body.addView(textView(nm ?: rows.first().number, 18f, ink, true))
+        if (nm != null) body.addView(textView(rows.first().number, 12f, muted).apply { setPadding(0, dp(3), 0, 0) })
+
+        val wide = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(12), 0, 0)
+            setPadding(dp(18), dp(16), dp(18), dp(16))
+            background = rounded(panelBg, 20)
         }
-        box.addView(result)
+        wide.addView(textView("TOTAL CALLS", 10f, 0xFFBDBDBD.toInt(), true))
+        wide.addView(countText(rows.size, 0xFFFFFFFF.toInt(), 0xFFBDBDBD.toInt()).apply { setPadding(0, dp(8), 0, 0) })
+        wide.addView(textView("Total call time  ·  ${fmtDuration(incSec + outSec)}", 12f, 0xFFDDDDDD.toInt())
+            .apply { setPadding(0, dp(8), 0, 0) })
+        body.addView(wide, LinearLayout.LayoutParams(MP, WC).apply { topMargin = dp(14); bottomMargin = dp(10) })
 
-        fun statRow(label: String, count: Int, extra: String? = null) {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(0, dp(9), 0, dp(9))
-            }
-            val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            top.addView(textView(label, 14f, ink, false),
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            top.addView(textView("$count times", 15f, ink, true))
-            row.addView(top)
-            if (extra != null) row.addView(textView(extra, 12f, muted).apply { setPadding(0, dp(3), 0, 0) })
-            result.addView(row)
-            result.addView(View(this).apply { setBackgroundColor(line) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
-        }
-
-        fun refresh() {
-            result.removeAllViews()
-            val key = last10(input.text.toString())
-            if (key.length < 5) {
-                result.addView(textView("Number daalo (kam se kam 5 digit)", 12f, muted))
-                return
-            }
-            val rows = entries.filter { last10(it.number) == key }
-            if (rows.isEmpty()) {
-                result.addView(textView("Is number ka koi record nahi mila", 13f, muted))
-                return
-            }
-            val inc = rows.filter { it.type == CallLog.Calls.INCOMING_TYPE }
-            val outAll = rows.filter { it.type == CallLog.Calls.OUTGOING_TYPE }
-            val outOk = outAll.filter { it.duration > 0 }
-            val outNo = outAll.filter { it.duration <= 0 }
-            val missed = rows.count { it.type == CallLog.Calls.MISSED_TYPE }
-            val rejected = rows.count { it.type == CallLog.Calls.REJECTED_TYPE }
-            val blocked = rows.count { it.type == CallLog.Calls.BLOCKED_TYPE }
-            val incSec = inc.sumOf { it.duration }
-            val outSec = outAll.sumOf { it.duration }
-
-            val nm = names[rows.first().number]
-            result.addView(textView(nm ?: rows.first().number, 16f, ink, true).apply { setPadding(0, 0, 0, dp(4)) })
-            statRow("Incoming (connected)", inc.size, "Total time: ${fmtDuration(incSec)}")
-            statRow("Outgoing connected", outOk.size, "Total time: ${fmtDuration(outSec)}")
-            statRow("Outgoing not connected", outNo.size)
-            statRow("Missed", missed)
-            statRow("Rejected", rejected)
-            if (blocked > 0) statRow("Blocked", blocked)
-            statRow("Total calls", rows.size, "Total call time: ${fmtDuration(incSec + outSec)}")
-        }
-        input.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { refresh() }
-            override fun afterTextChanged(s: android.text.Editable?) {}
-        })
-        refresh()
-        AlertDialog.Builder(this)
-            .setTitle("Number stats")
-            .setView(ScrollView(this).apply { addView(box) })
-            .setPositiveButton("CLOSE", null)
-            .show()
+        val gap = LinearLayout.LayoutParams(MP, WC).apply { bottomMargin = dp(10) }
+        body.addView(tileRow(
+            statTile(inc.size, "Incoming", "Total time  ${fmtDuration(incSec)}"),
+            statTile(outOk.size, "Outgoing connected", "Total time  ${fmtDuration(outSec)}")
+        ), gap)
+        body.addView(tileRow(
+            statTile(outNo.size, "Outgoing not connected", null),
+            statTile(missed, "Missed", null)
+        ), gap)
+        body.addView(tileRow(
+            statTile(rejected, "Rejected", null),
+            if (blocked > 0) statTile(blocked, "Blocked", null) else null
+        ), gap)
     }
 
     private fun typeName(type: Int) = when (type) {
@@ -889,96 +975,288 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun editEntry(item: DisplayItem) {
-        val entry = item.rep
+    // ---------------- Full-screen form (Edit + New entry) ----------------
+    private fun formLabel(t: String) = textView(t, 10f, muted, true).apply {
+        setPadding(dp(2), dp(20), 0, dp(8))
+        letterSpacing = 0.12f
+    }
+
+    private fun styledEdit(hintText: String, type: Int) = EditText(this).apply {
+        hint = hintText
+        textSize = 15f
+        setTextColor(ink)
+        setHintTextColor(muted)
+        inputType = type
+        setSingleLine(true)
+        gravity = Gravity.CENTER_VERTICAL
+        background = null
+    }
+
+    private fun fieldBox(edit: EditText): LinearLayout = LinearLayout(this).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        background = rounded(cardBg, 15, line)
+        setPadding(dp(14), 0, dp(14), 0)
+        addView(edit, LinearLayout.LayoutParams(MP, dp(52)))
+    }
+
+    private fun valueTile(value: String) = TextView(this).apply {
+        text = value
+        textSize = 15f
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        gravity = Gravity.CENTER
+        setTextColor(ink)
+        background = rounded(cardBg, 15, line)
+    }
+
+    private fun formFail(msg: String) {
+        formError.text = msg
+        formError.visibility = View.VISIBLE
+    }
+
+    private fun openForm(title: String, content: View, saveLabel: String, onSave: () -> Unit) {
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(paper)
+            isClickable = true
+            setPadding(dp(20), dp(14), dp(20), dp(10))
+        }
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(squareButton("←", "Back") { closeForm() },
+            LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginEnd = dp(14) })
+        head.addView(textView(title, 22f, ink, true), LinearLayout.LayoutParams(0, WC, 1f))
+        form.addView(head)
+        val sv = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            clipToPadding = false
+            addView(content)
+        }
+        form.addView(sv, LinearLayout.LayoutParams(MP, 0, 1f))
+        formError = textView("", 12f, danger, true).apply {
+            visibility = View.GONE
+            setPadding(dp(2), dp(8), 0, dp(6))
+        }
+        form.addView(formError)
+        form.addView(TextView(this).apply {
+            text = saveLabel
+            textSize = 13f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setTextColor(onInk)
+            background = rounded(ink, 15)
+            setOnClickListener { onSave() }
+        }, LinearLayout.LayoutParams(MP, dp(52)))
+
+        val wasOpen = formOpen
+        formToken++
+        formHost.animate().cancel()
+        formHost.removeAllViews()
+        formHost.addView(form, FrameLayout.LayoutParams(MP, MP))
+        formHost.visibility = View.VISIBLE
+        formOpen = true
+        if (!wasOpen) {
+            formHost.translationX = rootLayout.width.toFloat()
+            formHost.animate().translationX(0f).setDuration(220).start()
+        } else {
+            formHost.translationX = 0f
+        }
+    }
+
+    private fun closeForm() {
+        if (!formOpen) return
+        hideKeyboard()
+        formOpen = false
+        val token = ++formToken
+        formHost.animate().translationX(rootLayout.width.toFloat()).setDuration(190).withEndAction {
+            if (token == formToken) {
+                formHost.visibility = View.GONE
+                formHost.removeAllViews()
+            }
+        }.start()
+    }
+
+    private fun editEntry(item: DisplayItem) = showEntryForm(item, null)
+
+    // prefill != null → "Copy": opens the form with that record's values filled in.
+    private fun addNewEntry(prefill: DisplayItem? = null) = showEntryForm(null, prefill)
+
+    private fun showEntryForm(editItem: DisplayItem?, prefill: DisplayItem?) {
         if (!has(Manifest.permission.WRITE_CALL_LOG)) {
             AlertDialog.Builder(this)
                 .setTitle("Write permission unavailable")
-                .setMessage("Android has not granted WRITE_CALL_LOG. The app cannot update system call records without it.")
+                .setMessage("Android has not granted WRITE_CALL_LOG. Request access first; Android may still restrict changing system call records.")
                 .setPositiveButton("Request permission") { _, _ -> requestPermissions() }
                 .setNegativeButton("Cancel", null).show()
             return
         }
+        val editing = editItem != null
+        val src = (editItem ?: prefill)?.rep
+        val dateFmt = SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
+        val timeFmt = SimpleDateFormat("hh:mm a", Locale.getDefault())
+        val selectedDate = java.util.Calendar.getInstance().apply { if (src != null) timeInMillis = src.date }
+        var selectedType = src?.type ?: CallLog.Calls.INCOMING_TYPE
+        val originalNoAnswer = editing && src != null && isNoAnswerType(src.type)
+
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 8, 24, 0)
+            setPadding(0, 0, 0, dp(16))
         }
-        val numberInput = EditText(this).apply { hint = "Phone number"; setText(entry.number) }
-        val durationInput = EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+
+        // NAME OR NUMBER (+ contact suggestions)
+        panel.addView(formLabel("NAME OR NUMBER").apply { setPadding(dp(2), dp(18), 0, dp(8)) })
+        val numberInput = styledEdit("Name or number", android.text.InputType.TYPE_CLASS_TEXT).apply {
+            if (src != null) setText(src.number)
         }
-        val countInput = EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-        }
-        val selectedDate = java.util.Calendar.getInstance().apply { timeInMillis = entry.date }
-        val dateButton = Button(this).apply {
-            text = "DATE  ·  " + SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(entry.date))
-        }
-        dateButton.setOnClickListener {
-            DatePickerDialog(this, { _, y, m, d ->
-                selectedDate.set(y, m, d)
-                dateButton.text = "DATE  ·  " + SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(selectedDate.time)
-            }, selectedDate.get(java.util.Calendar.YEAR), selectedDate.get(java.util.Calendar.MONTH), selectedDate.get(java.util.Calendar.DAY_OF_MONTH)).show()
-        }
-        val timeButton = Button(this).apply {
-            text = "TIME  ·  " + SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(entry.date))
-        }
-        timeButton.setOnClickListener {
-            showAnalogTimePicker(selectedDate) {
-                timeButton.text = "TIME  ·  " + SimpleDateFormat("hh:mm a", Locale.getDefault()).format(selectedDate.time)
+        panel.addView(fieldBox(numberInput))
+        val sugg = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        panel.addView(sugg)
+        var picking = false
+        fun showSuggestions() {
+            sugg.removeAllViews()
+            val q = numberInput.text.toString().trim()
+            if (picking || q.length < 2) return
+            val found = searchContacts(q)
+            if (found.isEmpty()) {
+                if (q.any { it.isLetter() } && !has(Manifest.permission.READ_CONTACTS)) {
+                    sugg.addView(textView("Naam se search ke liye Contacts permission do (tap)", 12f, muted).apply {
+                        setPadding(dp(2), dp(10), 0, 0)
+                        setOnClickListener {
+                            requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), contactsCode)
+                        }
+                    })
+                }
+                return
+            }
+            found.forEach { (nm, num) ->
+                sugg.addView(contactRow(nm, num) {
+                    picking = true
+                    numberInput.setText(num)
+                    numberInput.setSelection(numberInput.text.length)
+                    picking = false
+                    sugg.removeAllViews()
+                    hideKeyboard()
+                }, LinearLayout.LayoutParams(MP, WC).apply { topMargin = dp(8) })
             }
         }
-        var selectedType = entry.type
-        val originalNoAnswer = isNoAnswerType(entry.type)
-        val updateTypeFields = {
-            val noAnswer = isNoAnswerType(selectedType)
-            durationInput.visibility = if (noAnswer) View.GONE else View.VISIBLE
-            countInput.visibility = if (noAnswer) View.VISIBLE else View.GONE
-            durationInput.hint = "Duration in seconds" +
-                if (!originalNoAnswer) " (now ${entry.duration})" else ""
-            countInput.hint = "X Times Get ${typeName(selectedType)}" +
-                if (originalNoAnswer) " (now ${item.count})" else ""
+        numberInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { showSuggestions() }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+
+        // Duration / count fields start EMPTY. In Edit a blank field keeps the current value.
+        val durationLabel = formLabel("DURATION (SECONDS)")
+        val durationInput = styledEdit("Seconds", android.text.InputType.TYPE_CLASS_NUMBER).apply {
+            if (!editing && src != null && !isNoAnswerType(src.type)) setText(src.duration.toString())
         }
-        val typeChips = createCallTypeChips(entry.type) {
+        val durationBox = fieldBox(durationInput)
+        val countLabel = formLabel("")
+        val countInput = styledEdit("How many times", android.text.InputType.TYPE_CLASS_NUMBER).apply {
+            if (!editing && prefill != null && prefill.grouped) setText(prefill.count.toString())
+        }
+        val countBox = fieldBox(countInput)
+        fun updateTypeFields() {
+            val noAnswer = isNoAnswerType(selectedType)
+            val showDur = if (noAnswer) View.GONE else View.VISIBLE
+            val showCnt = if (noAnswer) View.VISIBLE else View.GONE
+            durationLabel.visibility = showDur
+            durationBox.visibility = showDur
+            countLabel.visibility = showCnt
+            countBox.visibility = showCnt
+            countLabel.text = "X TIMES GET ${typeName(selectedType).uppercase(Locale.getDefault())}"
+            durationInput.hint = "Seconds" +
+                if (editing && !originalNoAnswer && src != null) "   (now ${src.duration})" else ""
+            countInput.hint = "How many times" +
+                if (editing && originalNoAnswer && editItem != null) "   (now ${editItem.count})" else ""
+        }
+
+        panel.addView(formLabel("TYPE"))
+        panel.addView(createCallTypeChips(selectedType) {
             selectedType = it
             updateTypeFields()
+        })
+
+        // DATE & TIME (date picker + analog clock kept as before)
+        panel.addView(formLabel("DATE & TIME"))
+        val dateTile = valueTile(dateFmt.format(selectedDate.time))
+        val timeTile = valueTile(timeFmt.format(selectedDate.time))
+        dateTile.setOnClickListener {
+            DatePickerDialog(this, { _, y, m, d ->
+                selectedDate.set(y, m, d)
+                dateTile.text = dateFmt.format(selectedDate.time)
+            }, selectedDate.get(java.util.Calendar.YEAR), selectedDate.get(java.util.Calendar.MONTH),
+                selectedDate.get(java.util.Calendar.DAY_OF_MONTH)).show()
         }
-        panel.addView(numberInput)
-        panel.addView(typeChips)
-        panel.addView(dateButton)
-        panel.addView(timeButton)
-        panel.addView(durationInput)
-        panel.addView(countInput)
+        timeTile.setOnClickListener {
+            showAnalogTimePicker(selectedDate) { timeTile.text = timeFmt.format(selectedDate.time) }
+        }
+        val dtRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        dtRow.addView(dateTile, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginEnd = dp(8) })
+        dtRow.addView(timeTile, LinearLayout.LayoutParams(0, dp(52), 1f))
+        panel.addView(dtRow)
+
+        panel.addView(durationLabel)
+        panel.addView(durationBox)
+        panel.addView(countLabel)
+        panel.addView(countBox)
         updateTypeFields()
 
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("Edit call record")
-            .setView(panel)
-            .setPositiveButton("Save", null)
-            .setNegativeButton("Cancel", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val number = numberInput.text.toString().trim()
-                if (number.isBlank()) {
-                    numberInput.error = "Enter a phone number"
-                    return@setOnClickListener
+        if (!editing) {
+            panel.addView(textView(
+                "Ye manually banaya hua record hai, asli call ka saboot nahi. Android insert reject bhi kar sakta hai.",
+                11f, muted
+            ).apply { setPadding(dp(2), dp(22), 0, 0) })
+        }
+
+        if (editing && editItem != null) {
+            val extra = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(28), 0, 0)
+            }
+            extra.addView(actionButton("COPY AS NEW", ink, soft) { addNewEntry(editItem) }.apply { textSize = 11f },
+                LinearLayout.LayoutParams(0, dp(46), 1f).apply { marginEnd = dp(8) })
+            var armed = false
+            val del = actionButton("DELETE", danger, dangerBg) { }.apply { textSize = 11f }
+            del.setOnClickListener {
+                if (!armed) {
+                    armed = true
+                    del.text = "TAP AGAIN TO DELETE"
+                    del.postDelayed({ armed = false; del.text = "DELETE" }, 3000L)
+                } else {
+                    closeForm()
+                    deleteItems(listOf(editItem))
                 }
-                val noAnswer = isNoAnswerType(selectedType)
+            }
+            extra.addView(del, LinearLayout.LayoutParams(0, dp(46), 1f))
+            panel.addView(extra)
+        }
+
+        fun save() {
+            val number = numberInput.text.toString().trim()
+            if (number.isBlank() || (number.none { it.isDigit() } && !(editing && number == src?.number))) {
+                formFail("Number daalo ya list se contact chuno")
+                return
+            }
+            val noAnswer = isNoAnswerType(selectedType)
+            if (editing && editItem != null && src != null) {
+                val entry = src
+                val item = editItem
                 // Blank field = keep what the record already has.
                 val countText = countInput.text.toString().trim()
                 val wanted = if (countText.isEmpty()) (if (originalNoAnswer) item.count else 1)
                 else countText.toIntOrNull()
                 if (noAnswer && (wanted == null || wanted !in 1..500)) {
-                    countInput.error = "Enter 1 to 500"
-                    return@setOnClickListener
+                    formFail("Times: 1 se 500 ke beech daalo")
+                    return
                 }
                 val durationText = durationInput.text.toString().trim()
                 val duration = if (durationText.isEmpty()) (if (originalNoAnswer) 0L else entry.duration)
                 else durationText.toLongOrNull()
                 if (!noAnswer && (duration == null || duration < 0)) {
-                    durationInput.error = "Enter duration 0 or greater"
-                    return@setOnClickListener
+                    formFail("Duration 0 ya usse zyada daalo")
+                    return
                 }
                 try {
                     val values = ContentValues().apply {
@@ -991,8 +1269,8 @@ class MainActivity : Activity() {
                     val updated = contentResolver.update(uri, values, null, null)
                     if (updated > 0) {
                         val sameGroup = number == entry.number && selectedType == entry.type
-                        // Group was moved to another number/type (or turned into a normal
-                        // call): remove the old siblings so nothing is left behind.
+                        // Group moved to another number/type (or turned into a normal call):
+                        // remove the old siblings so nothing is left behind.
                         if (!(sameGroup && noAnswer)) {
                             item.rows.filter { it.id != entry.id }.forEach { deleteById(it.id) }
                         }
@@ -1001,131 +1279,53 @@ class MainActivity : Activity() {
                         }
                     }
                     Toast.makeText(this, if (updated > 0) "Record updated" else "Android did not update this record", Toast.LENGTH_LONG).show()
-                    dialog.dismiss()
+                    closeForm()
                     loadCalls()
                 } catch (e: Exception) {
                     Toast.makeText(this, "Update failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
-            }
-        }
-        dialog.show()
-    }
-
-    // prefill != null → "Copy": opens the form with that record's values filled in.
-    private fun addNewEntry(prefill: DisplayItem? = null) {
-        if (!has(Manifest.permission.WRITE_CALL_LOG)) {
-            AlertDialog.Builder(this)
-                .setTitle("Write permission unavailable")
-                .setMessage("Android has not granted WRITE_CALL_LOG. Request access first; Android may still restrict inserting system call records.")
-                .setPositiveButton("Request permission") { _, _ -> requestPermissions() }
-                .setNegativeButton("Cancel", null).show()
-            return
-        }
-        val src = prefill?.rep
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(24, 8, 24, 0)
-        }
-        val numberInput = EditText(this).apply {
-            hint = "Phone number (required)"
-            inputType = android.text.InputType.TYPE_CLASS_PHONE
-            if (src != null) setText(src.number)
-        }
-        var selectedType = src?.type ?: CallLog.Calls.INCOMING_TYPE
-        val selectedDate = java.util.Calendar.getInstance().apply { if (src != null) timeInMillis = src.date }
-        val dateButton = Button(this).apply { text = "DATE  ·  " + SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(selectedDate.time) }
-        dateButton.setOnClickListener {
-            DatePickerDialog(this, { _, y, m, d ->
-                selectedDate.set(y, m, d)
-                dateButton.text = "DATE  ·  " + SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(selectedDate.time)
-            }, selectedDate.get(java.util.Calendar.YEAR), selectedDate.get(java.util.Calendar.MONTH), selectedDate.get(java.util.Calendar.DAY_OF_MONTH)).show()
-        }
-        val timeButton = Button(this).apply { text = "TIME  ·  " + SimpleDateFormat("hh:mm a", Locale.getDefault()).format(selectedDate.time) }
-        timeButton.setOnClickListener { showAnalogTimePicker(selectedDate) { timeButton.text = "TIME  ·  " + SimpleDateFormat("hh:mm a", Locale.getDefault()).format(selectedDate.time) } }
-        // Fields start empty: the hint only tells what the field is.
-        val durationInput = EditText(this).apply {
-            hint = "Duration in seconds"
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            if (src != null && !isNoAnswerType(src.type)) setText(src.duration.toString())
-        }
-        val countInput = EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            if (prefill != null && prefill.grouped) setText(prefill.count.toString())
-        }
-        val updateTypeFields = {
-            val noAnswer = isNoAnswerType(selectedType)
-            durationInput.visibility = if (noAnswer) View.GONE else View.VISIBLE
-            countInput.visibility = if (noAnswer) View.VISIBLE else View.GONE
-            countInput.hint = "X Times Get ${typeName(selectedType)}"
-        }
-        val typeChips = createCallTypeChips(selectedType) {
-            selectedType = it
-            updateTypeFields()
-        }
-        panel.addView(numberInput)
-        panel.addView(typeChips)
-        panel.addView(dateButton)
-        panel.addView(timeButton)
-        panel.addView(durationInput)
-        panel.addView(countInput)
-        updateTypeFields()
-
-        AlertDialog.Builder(this)
-            .setTitle(if (prefill != null) "Copy call-log entry" else "New manual call-log entry")
-            .setMessage("This creates a manually entered record, not proof that a call actually occurred. Android may reject the insert.")
-            .setView(panel)
-            .setPositiveButton("Create entry", null)
-            .setNegativeButton("Cancel", null)
-            .create().also { dialog ->
-                dialog.setOnShowListener {
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                        val number = numberInput.text.toString().trim()
-                        val duration = durationInput.text.toString().trim().toLongOrNull()
-                        val times = countInput.text.toString().trim().toIntOrNull()
-                        val noAnswer = isNoAnswerType(selectedType)
-                        if (number.isBlank()) {
-                            numberInput.error = "Enter a phone number"
-                            return@setOnClickListener
-                        }
-                        if (noAnswer && (times == null || times !in 1..500)) {
-                            countInput.error = "Enter 1 to 500"
-                            return@setOnClickListener
-                        }
-                        if (!noAnswer && (duration == null || duration < 0)) {
-                            durationInput.error = "Enter duration 0 or greater"
-                            return@setOnClickListener
-                        }
-                        try {
-                            val total = if (noAnswer) times!! else 1
-                            var created = 0
-                            repeat(total) { index ->
-                                val values = ContentValues().apply {
-                                    put(CallLog.Calls.NUMBER, number)
-                                    put(CallLog.Calls.TYPE, selectedType)
-                                    put(CallLog.Calls.DATE, selectedDate.timeInMillis - index * 1000L)
-                                    put(CallLog.Calls.DURATION, if (noAnswer) 0L else duration!!)
-                                    put(CallLog.Calls.NEW, 1)
-                                }
-                                if (contentResolver.insert(CallLog.Calls.CONTENT_URI, values) != null) created++
-                            }
-                            if (created > 0) {
-                                Toast.makeText(this, if (noAnswer) "$created ${typeName(selectedType).lowercase()} calls added" else "Manual entry created", Toast.LENGTH_LONG).show()
-                                dialog.dismiss()
-                                loadCalls()
-                            } else {
-                                Toast.makeText(this, "Android did not create the entry", Toast.LENGTH_LONG).show()
-                            }
-                        } catch (e: SecurityException) {
-                            Toast.makeText(this, "Android blocked insertion: ${e.message}", Toast.LENGTH_LONG).show()
-                        } catch (e: Exception) {
-                            Toast.makeText(this, "Could not create entry: ${e.message}", Toast.LENGTH_LONG).show()
-                        }
-                    }
+            } else {
+                val duration = durationInput.text.toString().trim().toLongOrNull()
+                val times = countInput.text.toString().trim().toIntOrNull()
+                if (noAnswer && (times == null || times !in 1..500)) {
+                    formFail("Times: 1 se 500 ke beech daalo")
+                    return
                 }
-                dialog.show()
+                if (!noAnswer && (duration == null || duration < 0)) {
+                    formFail("Duration 0 ya usse zyada daalo")
+                    return
+                }
+                try {
+                    val total = if (noAnswer) times!! else 1
+                    var created = 0
+                    repeat(total) { index ->
+                        val values = ContentValues().apply {
+                            put(CallLog.Calls.NUMBER, number)
+                            put(CallLog.Calls.TYPE, selectedType)
+                            put(CallLog.Calls.DATE, selectedDate.timeInMillis - index * 1000L)
+                            put(CallLog.Calls.DURATION, if (noAnswer) 0L else duration!!)
+                            put(CallLog.Calls.NEW, 1)
+                        }
+                        if (contentResolver.insert(CallLog.Calls.CONTENT_URI, values) != null) created++
+                    }
+                    if (created > 0) {
+                        Toast.makeText(this, if (noAnswer) "$created ${typeName(selectedType).lowercase(Locale.getDefault())} calls added" else "Manual entry created", Toast.LENGTH_LONG).show()
+                        closeForm()
+                        loadCalls()
+                    } else {
+                        Toast.makeText(this, "Android did not create the entry", Toast.LENGTH_LONG).show()
+                    }
+                } catch (e: SecurityException) {
+                    Toast.makeText(this, "Android blocked insertion: ${e.message}", Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Could not create entry: ${e.message}", Toast.LENGTH_LONG).show()
+                }
             }
-    }
+        }
 
+        val title = if (editing) "Edit record" else if (prefill != null) "Copy entry" else "New entry"
+        openForm(title, panel, if (editing) "SAVE CHANGES" else "CREATE ENTRY") { save() }
+    }
 
     private fun showAnalogTimePicker(
         calendar: java.util.Calendar,
@@ -1262,98 +1462,99 @@ class MainActivity : Activity() {
     }
 }
 
-private class SwipeRow(
-    context: Context,
-    private val front: View,
-    back: View,
-    private val onSwipeRight: () -> Unit,
-    private val onSwipeLeft: () -> Unit,
-    private val onLongPress: () -> Unit,
-    private val onTap: () -> Unit
-) : FrameLayout(context) {
-    var swipeEnabled = true
-    private val slop = ViewConfiguration.get(context).scaledTouchSlop
+// Two-page horizontal pager (Editor / Search). Swipe anywhere; cards use tap / long-press only.
+private class SwipePager(context: Context, private val onChange: (Int) -> Unit) : FrameLayout(context) {
+    var page = 0
+        private set
+    private var drag = 0f
     private var downX = 0f
     private var downY = 0f
     private var dragging = false
-    private var longFired = false
-    private val longPressRunnable = Runnable {
-        if (swipeEnabled && !dragging) {
-            longFired = true
-            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-            onLongPress()
+    private var animator: android.animation.ValueAnimator? = null
+    private val slop = ViewConfiguration.get(context).scaledTouchSlop
+
+    override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+        super.onLayout(changed, l, t, r, b)
+        applyOffsets()
+    }
+
+    private fun applyOffsets() {
+        for (i in 0 until childCount) getChildAt(i).translationX = (i - page) * width + drag
+    }
+
+    fun goTo(target: Int) {
+        if (target != page) settle(target)
+    }
+
+    private fun settle(target: Int) {
+        animator?.end()
+        val end = if (target == page) 0f else if (page == 0) -width.toFloat() else width.toFloat()
+        val a = android.animation.ValueAnimator.ofFloat(drag, end).setDuration(200)
+        a.addUpdateListener {
+            drag = it.animatedValue as Float
+            applyOffsets()
         }
+        a.addListener(object : android.animation.AnimatorListenerAdapter() {
+            override fun onAnimationEnd(an: android.animation.Animator) {
+                val changed = target != page
+                page = target
+                drag = 0f
+                applyOffsets()
+                if (changed) onChange(page)
+            }
+        })
+        animator = a
+        a.start()
     }
 
-    init {
-        addView(back, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-        ))
-        addView(front, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ))
-    }
-
-    private fun startPress(ev: MotionEvent) {
-        downX = ev.x
-        downY = ev.y
-        dragging = false
-        longFired = false
-        removeCallbacks(longPressRunnable)
-        postDelayed(longPressRunnable, ViewConfiguration.getLongPressTimeout().toLong())
-    }
-
-    private fun beginDrag() {
-        dragging = true
-        removeCallbacks(longPressRunnable)
-        parent?.requestDisallowInterceptTouchEvent(true)
+    private fun shouldStart(ev: MotionEvent): Boolean {
+        val dx = ev.x - downX
+        val dy = ev.y - downY
+        if (abs(dx) < slop * 2 || abs(dx) < abs(dy) * 1.5f) return false
+        return (page == 0 && dx < 0) || (page == 1 && dx > 0)
     }
 
     override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
-            MotionEvent.ACTION_DOWN -> startPress(ev)
-            MotionEvent.ACTION_MOVE -> {
-                val dx = ev.x - downX
-                val dy = ev.y - downY
-                if (swipeEnabled && !dragging && abs(dx) > slop && abs(dx) > abs(dy)) {
-                    beginDrag()
-                    return true
-                }
-                if (abs(dx) > slop || abs(dy) > slop) removeCallbacks(longPressRunnable)
+            MotionEvent.ACTION_DOWN -> {
+                animator?.end()
+                downX = ev.x
+                downY = ev.y
+                dragging = false
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> removeCallbacks(longPressRunnable)
+            MotionEvent.ACTION_MOVE -> if (!dragging && shouldStart(ev)) {
+                dragging = true
+                downX = ev.x
+                parent?.requestDisallowInterceptTouchEvent(true)
+            }
         }
-        return false
+        return dragging
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
-            MotionEvent.ACTION_DOWN -> return true
+            MotionEvent.ACTION_DOWN -> {
+                downX = ev.x
+                downY = ev.y
+                dragging = false
+                return true
+            }
             MotionEvent.ACTION_MOVE -> {
-                val dx = ev.x - downX
-                val dy = ev.y - downY
-                if (!dragging && swipeEnabled && abs(dx) > slop && abs(dx) > abs(dy)) beginDrag()
-                if (dragging) front.translationX = dx
-                else if (abs(dx) > slop || abs(dy) > slop) removeCallbacks(longPressRunnable)
-            }
-            MotionEvent.ACTION_UP -> {
-                removeCallbacks(longPressRunnable)
-                val dx = ev.x - downX
+                if (!dragging && shouldStart(ev)) {
+                    dragging = true
+                    downX = ev.x
+                }
                 if (dragging) {
-                    dragging = false
-                    val threshold = width * 0.28f
-                    front.animate().translationX(0f).setDuration(180).start()
-                    if (dx <= -threshold) onSwipeLeft() else if (dx >= threshold) onSwipeRight()
-                } else if (!longFired && abs(dx) < slop && abs(ev.y - downY) < slop) {
-                    onTap()
+                    val dx = ev.x - downX
+                    drag = if (page == 0) dx.coerceIn(-width.toFloat(), 0f) else dx.coerceIn(0f, width.toFloat())
+                    applyOffsets()
                 }
             }
-            MotionEvent.ACTION_CANCEL -> {
-                removeCallbacks(longPressRunnable)
-                if (dragging) {
-                    dragging = false
-                    front.animate().translationX(0f).setDuration(180).start()
-                }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (dragging) {
+                dragging = false
+                val thr = width * 0.2f
+                val target = if (page == 0 && drag < -thr) 1 else if (page == 1 && drag > thr) 0 else page
+                settle(target)
             }
         }
         return true
